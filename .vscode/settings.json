@@ -1,0 +1,33 @@
+{
+    "rust-analyzer.diagnostics.disabled": [
+        "unresolved-macro-call"
+    ],
+    "terminal.integrated.env.windows": {
+        "PATH": "${env:PATH};F:\\Qt\\Qt5.12.1\\5.12.1\\msvc2017_64\\bin"
+    },
+    "terminal.integrated.profiles.windows": {
+        "PowerShell": {
+            "source": "PowerShell",
+            "icon": "terminal-powershell"
+        },
+        "Command Prompt": {
+            "path": [
+                "${env:windir}\\Sysnative\\cmd.exe",
+                "${env:windir}\\System32\\cmd.exe"
+            ],
+            "args": [],
+            "icon": "terminal-cmd"
+        },
+        "Git Bash": {
+            "source": "Git Bash"
+        },
+        "Visual Studio Cmd": {
+            "path": [
+                "${env:windir}\\System32\\cmd.exe"
+            ],
+            "args": ["/k", "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Professional\\VC\\Auxiliary\\Build\\vcvars64.bat"],
+            "icon": "terminal-cmd"
+        }
+    },
+    "terminal.integrated.defaultProfile.windows": "Visual Studio Cmd"
+}
