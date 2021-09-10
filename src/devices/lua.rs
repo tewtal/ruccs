@@ -1,21 +1,22 @@
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Sender, Receiver, channel};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use tokio::sync::mpsc::{Sender, channel};
+use tokio::io::{AsyncWriteExt};
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use uuid::Uuid;
 
-use crate::devices::device::{Command, Device, DeviceInfo, DeviceManagerCommand};
+use crate::devices::device::{DeviceRequest, DeviceResponse, Device, DeviceInfo, DeviceManagerCommand};
 use crate::manager::ManagerInfo;
-use async_trait::async_trait;
+use crate::protocol::{Request, Command};
 
+
+#[allow(dead_code)]
 pub struct Lua {
     id: Uuid,
-    name: &'static str,
+    name: String,
     stream: TcpStream,
     addr: SocketAddr
 }
@@ -26,7 +27,7 @@ impl Lua {
     {
         Self {
             id,
-            name: "Lua Device",
+            name: format!("LuaDevice {} :: {:?}", id, addr),
             stream,
             addr
         }
@@ -41,8 +42,8 @@ impl Lua {
         let (device_tx, mut device_rx) = channel(128); // (Not sure about what's a reasonable size here)
 
         let device = Device {          
-            id: id,  
-            name: format!("LuaDevice {} :: {:?}", id, addr),
+            id,  
+            name: lua.name.to_string(),
             sender: device_tx
         };
 
@@ -51,16 +52,25 @@ impl Lua {
             let mut stream = BufReader::new(lua.stream);
             loop {
                 tokio::select! {
-                    /* This is where commands will eventually come in from connected websocket clients */
-                    Some(message) = device_rx.recv() => {
-                        match message {
-                            Command::GetInformation { resp: sender } => {
-                                let _ = sender.send(format!("LuaDevice {}", id));
+                    Some(command) = device_rx.recv() => {
+                        match command {
+                            DeviceRequest::Request { req, resp: sender } => {
+                                match req.command {
+                                    Command::Info => sender.send(DeviceResponse::Strings(vec!["1.0".to_string(), "0000".to_string(), "n/a".to_string(), format!("{}", lua.name)])).unwrap(),
+                                    Command::GetAddress(addr_info) => {
+                                        let (tx, rx) = tokio::sync::mpsc::channel(32);                                        
+                                        let response = DeviceResponse::BinaryReader((addr_info[0].size as usize, rx));
+                                        sender.send(response).unwrap();
+                                        tx.send(vec![0u8; addr_info[0].size as usize]).await.unwrap();                                        
+                                    }
+                                    _ => sender.send(DeviceResponse::Nothing).unwrap()
+                                }
                             },
-                            Command::Close => {
+                            DeviceRequest::Close => {
                                 stream.shutdown().await.unwrap();
                                 return;
-                            }
+                            },
+                            _ => ()
                         }    
                     },
                     result = stream.read_until(b'\n', &mut buf) => {
@@ -115,7 +125,7 @@ impl LuaManager {
                         match message {
                             DeviceManagerCommand::Close => {
                                 for (id, device) in &devices {
-                                    device.sender.send(Command::Close).await.unwrap();
+                                    device.sender.send(DeviceRequest::Close).await.unwrap();
                                     sender.send(ManagerInfo::DeviceRemoved(*id)).await.unwrap();
                                 }
                             }

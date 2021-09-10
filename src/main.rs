@@ -7,8 +7,10 @@ mod server;
 mod qt;
 mod manager;
 mod devices;
+mod protocol;
 
 fn main() {
+    //console_subscriber::init();
 
     /* Create device manager instance */
     let manager = Arc::new(RwLock::new(manager::Manager::new()));

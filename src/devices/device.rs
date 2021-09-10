@@ -1,17 +1,26 @@
-use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::sync::mpsc::{Sender, Receiver, channel};
+use tokio::sync::mpsc::{Sender, Receiver};
+use crate::protocol;
 use uuid::Uuid;
 
 type Responder<T> = tokio::sync::oneshot::Sender<T>;
 
+#[allow(dead_code)]
 #[derive(Debug)]
-pub enum Command {
-    GetInformation { resp: Responder<String> },
+pub enum DeviceRequest {
+    Request { req: protocol::Request, resp: Responder<DeviceResponse> },
     Close
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum DeviceResponse {
+    Strings(Vec<String>),
+    BinaryWriter((usize, Sender<Vec<u8>>)),
+    BinaryReader((usize, Receiver<Vec<u8>>)),
+    Nothing
+}
+
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum DeviceManagerCommand {
     Close
@@ -29,13 +38,15 @@ pub enum DeviceInfo {
 pub struct Device {
     pub name: String,
     pub id: Uuid,
-    pub sender: Sender<Command>,
+    pub sender: Sender<DeviceRequest>,
 }
 
+#[allow(dead_code)]
 impl Device {
-    pub async fn get_information(&self) -> Result<String, Box<dyn ::std::error::Error>> {
+    /* Helper function for sending a request to a device that creates a oneshot channel for the response and awaits a response */
+    pub async fn request(&self, req: protocol::Request) -> Result<DeviceResponse, Box<dyn ::std::error::Error + Send + Sync>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.sender.send(Command::GetInformation { resp: tx }).await?;
+        self.sender.send(DeviceRequest::Request { req, resp: tx }).await?;
         Ok(rx.await?)
     }
 }

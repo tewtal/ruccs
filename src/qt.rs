@@ -80,7 +80,7 @@ impl Form {
         self.device_menu.clear();        
         let names = self.runtime.block_on(async {
             let mgr = self.manager.as_ref().read().await;
-            mgr.get_names().await
+            mgr.get_names()
         });
 
         for name in names {
