@@ -18,7 +18,6 @@ enum ClientState {
     Ready,
     Busy,
     SendingData((usize, tokio::sync::mpsc::Sender<Vec<u8>>)),
-    Closing
 }
 
 struct Client {

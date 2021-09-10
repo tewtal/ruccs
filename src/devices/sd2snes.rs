@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
-use tokio_serial::{self, SerialPortInfo, SerialStream, SerialPortBuilder};
+use tokio_serial::{self, SerialPortInfo, SerialStream};
 use serialport::SerialPortType;
 use tokio::sync::mpsc::{Sender, channel};
 use uuid::Uuid;
-use std::ffi::CString;
+
 
 use crate::devices::device::{DeviceRequest, DeviceResponse, Device, DeviceInfo, DeviceManagerCommand};
 use crate::manager::ManagerInfo;
@@ -57,7 +57,7 @@ impl SD2Snes {
         buf
     }
 
-    pub async fn send_command(&mut self, opcode: Opcode, space: Space, flags: Flags, args: &[u8]) -> Vec<u8> {
+    pub async fn send_command(&mut self, opcode: Opcode, space: Space, flags: Flags, _args: &[u8]) -> Vec<u8> {
         let header = self.pad_or_truncate_size(256, &vec![b'U', b'S', b'B', b'A', opcode as u8, space as u8, flags.clone() as u8]);
         let data = self.pad_or_truncate(&header);
         
@@ -142,7 +142,6 @@ impl SD2Snes {
                                 let _ = sd2snes.stream.shutdown().await;
                                 break
                             },
-                            _ => ()
                         }    
                     },
                     else => break

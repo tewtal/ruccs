@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::devices::device::{DeviceRequest, DeviceResponse, Device, DeviceInfo, DeviceManagerCommand};
 use crate::manager::ManagerInfo;
-use crate::protocol::{Request, Command};
+use crate::protocol::{Command};
 
 
 #[allow(dead_code)]
@@ -70,7 +70,6 @@ impl Lua {
                                 stream.shutdown().await.unwrap();
                                 return;
                             },
-                            _ => ()
                         }    
                     },
                     result = stream.read_until(b'\n', &mut buf) => {

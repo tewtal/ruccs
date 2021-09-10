@@ -3,6 +3,7 @@ use serde::{Serialize, Deserialize};
 use std::str::FromStr;
 use strum_macros::EnumString;
 
+#[allow(dead_code, non_camel_case_types)]
 #[derive(Debug, Clone)]
 pub enum Opcode {
     GET,
@@ -29,6 +30,7 @@ pub enum Opcode {
     RESPONSE,    
 }
 
+#[allow(dead_code, non_camel_case_types)]
 #[derive(Debug, PartialEq, EnumString, Clone)]
 pub enum Space {
     FILE,
@@ -38,6 +40,7 @@ pub enum Space {
     CONFIG,   
 }
 
+#[allow(dead_code, non_camel_case_types)]
 #[derive(Debug, PartialEq, EnumString, Clone)]
 pub enum Flags {
     NONE = 0,
@@ -50,6 +53,7 @@ pub enum Flags {
     DATA64B = 128,    
 }
 
+#[allow(dead_code, non_camel_case_types)]
 pub enum InfoFlag {
     FEAT_DSPX = 1,
     FEAT_ST0010 = 2,
@@ -61,12 +65,14 @@ pub enum InfoFlag {
     FEAT_DMA1 = 128
 }
 
+#[allow(dead_code, non_camel_case_types)]
 #[derive(Debug)]
 pub enum FileType {
     DIRECTORY = 0,
     FILE = 1
 }
 
+#[allow(dead_code, non_camel_case_types)]
 #[derive(Debug)]
 pub enum MemoryDomain {
     WRAM,
