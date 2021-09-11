@@ -23,7 +23,9 @@ pub struct SD2Snes {
 
 pub enum CommandArg<'a> {
     AddressList(&'a Vec<AddressInfo>),
-    _Filename(String),
+    Filename(String),
+    FilenameAndSize((String, usize)),
+    Filenames((String, String)),
     None
 }
 
@@ -99,8 +101,8 @@ impl SD2Snes {
     /* amount of data is always read from the sd2snes */
 
     pub async fn read_stream(&mut self, tx: Sender<Vec<u8>>, padded_size: usize, data_size: usize) -> usize {
-        let mut read_len = 0;        
-        
+        let mut read_len = 0;
+                
         while read_len < padded_size {
             let read_size = if (padded_size - read_len) < 4096 { padded_size - read_len } else { 4096 };
             let mut buf = vec![0u8; read_size];
@@ -128,7 +130,6 @@ impl SD2Snes {
         /* Write all data coming from the websocket channel */
         while write_len < data_size {
             if let Some(data) = rx.recv().await {
-                println!("Got data from WS: {:?}/{:?}", data.len(), data_size);
                 self.write_data(&data, block_size).await;
                 write_len += data.len();
             } else {
@@ -148,7 +149,7 @@ impl SD2Snes {
     }
 
     /* Prepares and sends a command to the sd2snes from the given set of parameters */
-    pub async fn send_command(&mut self, opcode: Opcode, space: Space, flags: Flags, args: CommandArg<'_>) -> Vec<u8> {        
+    pub async fn send_command(&mut self, opcode: Opcode, space: Space, flags: Flags, args: CommandArg<'_>) -> Option<Vec<u8>> {        
         let mut buf = self.pad_or_truncate_size(256, &vec![b'U', b'S', b'B', b'A', opcode as u8, space as u8, flags.bits()]);
 
         match (space, opcode, args) {
@@ -173,7 +174,24 @@ impl SD2Snes {
                     buf[34 + (i*4)] = ((ai.orig_address >> 8) & 0xFF) as u8;
                     buf[35 + (i*4)] = (ai.orig_address & 0xFF) as u8;                    
                 }
-            }
+            },
+            (Space::FILE, Opcode::GET | Opcode::LS | Opcode::MKDIR | Opcode::RM | Opcode::BOOT, CommandArg::Filename(path)) => {
+                buf.extend(path.as_bytes());
+                buf = self.pad_or_truncate(&buf);
+            },
+            (Space::FILE, Opcode::MV, CommandArg::Filenames((from, to))) => {
+                buf.extend(from.as_bytes());
+                to.as_bytes().iter().enumerate().for_each(|(i, b)| buf[8 + i] = *b);
+                buf = self.pad_or_truncate(&buf);
+            },
+            (Space::FILE, Opcode::PUT, CommandArg::FilenameAndSize((path, size))) => {
+                buf.extend(path.as_bytes());                
+                buf[252] = ((size >> 24) & 0xFF) as u8;
+                buf[253] = ((size >> 16) & 0xFF) as u8;
+                buf[254] = ((size >> 8) & 0xFF) as u8;
+                buf[255] = (size & 0xFF) as u8;
+                buf = self.pad_or_truncate(&buf);
+            },
             _ => { buf = self.pad_or_truncate(&buf); }
         }
 
@@ -184,16 +202,15 @@ impl SD2Snes {
         self.write_data(&buf, buf.len()).await;
 
         if flags.contains(Flags::NORESP) {
-            Vec::new()
+            None
         } else {
-            let response = self.read_data(512).await;
-            response    
+            Some(self.read_data(512).await)
         }
     }
 
     /* Sends and parses an "Info" request */
     pub async fn get_information(&mut self) -> Vec<String> {
-        let data = self.send_command(Opcode::INFO, Space::SNES, Flags::NONE, CommandArg::None).await;
+        let data = self.send_command(Opcode::INFO, Space::SNES, Flags::NONE, CommandArg::None).await.unwrap();
         let str_data = String::from_utf8_lossy(&data[16..]).to_string();
         let split_data: Vec<&str> = str_data.split_terminator('\0').filter(|s| s != &"").collect();
         let mut info = Vec::new();                                                                                
@@ -236,19 +253,59 @@ impl SD2Snes {
                     Some(cmd) = device_rx.recv() => {
                         match cmd {
                             DeviceRequest::Request { req, resp: sender } => {
+                                let opcode = Opcode::from_request(&req);
+                                let block_size = if opcode == Opcode::VGET || opcode == Opcode::VPUT { 64 } else { 512 };
+
                                 match req.command {
                                     protocol::Command::Info => {
-                                        let response = DeviceResponse::Strings(sd2snes.get_information().await);                                    
-                                        sender.send(response).unwrap()
+                                        let response = DeviceResponse::Strings(sd2snes.get_information().await);
+                                        let _ = sender.send(response);
                                     },
+                                    protocol::Command::Menu |
+                                    protocol::Command::Reset => {
+                                        let _ = sd2snes.send_command(opcode, req.space, req.flags.unwrap_or(Flags::NONE), CommandArg::None).await;
+                                        let _ = sender.send(DeviceResponse::Empty);
+                                    },
+                                    protocol::Command::Remove(path) |
+                                    protocol::Command::MakeDir(path) |
+                                    protocol::Command::Boot(path) => {
+                                        let _ = sd2snes.send_command(opcode, Space::FILE, req.flags.unwrap_or(Flags::NONE), CommandArg::Filename(path)).await;
+                                        let _ = sender.send(DeviceResponse::Empty);
+                                    },
+                                    protocol::Command::Rename(paths) => {
+                                        let _ = sd2snes.send_command(opcode, Space::FILE, req.flags.unwrap_or(Flags::NONE), CommandArg::Filenames(paths)).await;
+                                        let _ = sender.send(DeviceResponse::Empty);
+                                    },
+                                    protocol::Command::List(path) => {
+                                        let _ = sd2snes.send_command(opcode, Space::FILE, req.flags.unwrap_or(Flags::NONE) | Flags::NORESP, CommandArg::Filename(path)).await;
+                                        let mut ls_type = 0u8;
+                                        let mut filelist = Vec::new();
+                                        while ls_type != 0xFF {
+                                            let (mut ptr, data) = (0, sd2snes.read_data(512).await);
+                                            while ptr < data.len() {
+                                                ls_type = data[ptr];
+                                                match ls_type {
+                                                    0 | 1 => {
+                                                        let mut f_idx = 0;
+                                                        while data[ptr + 1 + f_idx] != 0 { f_idx += 1; }
+                                                        let filename = String::from_utf8_lossy(&data[(ptr + 1)..(ptr + 1 + f_idx)]).to_string();
+                                                        filelist.push(vec![ls_type.to_string(), filename]);
+                                                        ptr += f_idx + 2;
+                                                    },
+                                                    _ => {
+                                                        break;
+                                                     }
+                                                }
+                                            }
+                                        }
+                                        let response = DeviceResponse::Strings(filelist.drain(..).flatten().collect());
+                                        let _ = sender.send(response);                                        
+                                    }
                                     protocol::Command::GetAddress(addr_info) => {
                                         
                                         /* Send a response back directly with a binary channel that will be used to push data that 
                                            gets read from the sd2snes */                                           
                                         let (tx, rx) = tokio::sync::mpsc::channel(32);
-
-                                        /* GET or VGET? */
-                                        let opcode = if addr_info.len() == 1 { Opcode::GET } else { Opcode::VGET };
 
                                         /* Calculate the total size and padded size of all requests */
                                         let (data_size, padded_size) = if opcode == Opcode::GET { 
@@ -277,9 +334,6 @@ impl SD2Snes {
                                         /* Send a response back directly with a binary channel that will be used to write data to the sd2snes */
                                         let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
-                                        /* PUT or VPUT? */
-                                        let (opcode, block_size) = if addr_info.len() == 1 { (Opcode::PUT, 512) } else { (Opcode::VPUT, 64) };
-
                                          /* Calculate the total size and padded size of all requests */
                                         let (data_size, padded_size) = if opcode == Opcode::PUT { 
                                             (addr_info[0].size as usize, sd2snes.pad_size(addr_info[0].size as usize, block_size))
@@ -302,7 +356,41 @@ impl SD2Snes {
 
                                         println!("PutAddress Complete: Got {:?}({:?}) - Sent: {:?}", padded_size, data_size, result);
                                     },
-                                    _ => sender.send(DeviceResponse::Nothing).unwrap()
+                                    protocol::Command::GetFile(path) => {
+                                        let (tx, rx) = tokio::sync::mpsc::channel(32);
+                                        let response = sd2snes.send_command(opcode, Space::FILE, req.flags.unwrap_or(Flags::NONE), CommandArg::Filename(path)).await.unwrap();
+                                        let data_size = (response[252] as usize) << 24 | (response[253] as usize) << 16 | (response[254] as usize) << 8 | response[255] as usize;
+                                        let padded_size = sd2snes.pad_size(data_size, block_size);
+                                        println!("GetFile response: Size: {:?}/{:?}", data_size, padded_size);
+
+                                        /* Create and send response */
+                                        let response = DeviceResponse::FileReader((data_size, rx));
+
+                                        /* Don't fail if sender is broken, we now have to read the file from the sd2snes even though the receiver is disconnected */
+                                        let _ = sender.send(response).unwrap();
+
+                                        /* Read data to the end */
+                                        let result = sd2snes.read_stream(tx, padded_size, data_size).await;                                        
+                                        println!("GetFile Complete: Sent {:?}({:?}) - Received: {:?}", padded_size, data_size, result);
+                                    },
+                                    protocol::Command::PutFile((path, data_size)) => {
+                                        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+                                        let padded_size = sd2snes.pad_size(data_size, block_size);
+                                     
+                                        /* Create and send response */
+                                        let response = DeviceResponse::BinaryWriter((data_size, tx));
+                                        sender.send(response).unwrap();
+
+                                        /* Send command to device to begin reading data */
+                                        let _ = sd2snes.send_command(opcode, Space::FILE, req.flags.unwrap_or(Flags::NONE) | Flags::NORESP, CommandArg::FilenameAndSize((path, data_size))).await;
+
+                                        /* Start reading from the input stream and write to the sd2snes */
+                                        let result = sd2snes.write_stream(&mut rx, padded_size, data_size, block_size).await;
+
+                                        println!("PutFile Complete: Got {:?}({:?}) - Sent: {:?}", padded_size, data_size, result);                                        
+                                    }
+
+                                    _ => sender.send(DeviceResponse::Empty).unwrap()
                                 }                                
                             },
                             DeviceRequest::Close => {

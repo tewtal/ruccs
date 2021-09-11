@@ -77,7 +77,7 @@ impl Lua {
                                             }
                                         }
                                     },
-                                    _ => sender.send(DeviceResponse::Nothing).unwrap()
+                                    _ => sender.send(DeviceResponse::Empty).unwrap()
                                 }
                             },
                             DeviceRequest::Close => {

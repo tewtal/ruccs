@@ -1,5 +1,6 @@
 use futures::{SinkExt, StreamExt};
 use futures::future::join_all;
+use qt_core::Receiver;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -8,7 +9,7 @@ use futures::stream::SplitSink;
 use tokio_tungstenite::{accept_async, WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
 use tungstenite::{Result};
-use serde_json;
+use serde_json::{self, json};
 use crate::manager::{Manager};
 use crate::protocol::{WSRequest, WSResponse, Request, Command};
 use crate::devices::device::DeviceResponse;
@@ -30,6 +31,7 @@ async fn handle_request(request: Request, manager: &Arc<RwLock<Manager>>, write:
     client.state = ClientState::Busy;
     let response = match (&request.command, client.device_id) {
         /* Handle commands that are specific to the websocket connection and shouldn't be sent to any device */
+        (Command::AppVersion, _) => Some(vec!["ruccs 0.1 alpha".to_string()]),
         (Command::DeviceList, _) => Some(manager.read().await.get_names()),
         (Command::Attach(device_name), _) => {
             if let Some((id, _)) = manager.read().await.get_device(device_name) {
@@ -37,7 +39,7 @@ async fn handle_request(request: Request, manager: &Arc<RwLock<Manager>>, write:
             } else {
                 Err("Invalid device name")?                
             }
-            Some(vec![])
+            None
         },
         (Command::Name(name), _) => {
             client.name = name.to_string();
@@ -60,6 +62,25 @@ async fn handle_request(request: Request, manager: &Arc<RwLock<Manager>>, write:
                         /* Forward binary data from the device to the websocket */
                         let mut received_len = 0;
                         
+                        while received_len < size {
+                            if let Some(data) = receiver.recv().await {
+                                received_len += data.len();                                
+                                write.send(Message::Binary(data)).await?;
+                            } else {
+                                /* Received nothing from the channel, possibly channel broke? */
+                                Err("Could not read binary data from the device")?
+                            }
+                        }
+                        None
+                    },
+                    DeviceResponse::FileReader((size, mut receiver)) => {
+                        /* Forward binary data from the device to the websocket */
+                        let mut received_len = 0;
+                        
+                        /* Send filesize response */
+                        write.send(Message::Text(serde_json::to_string(&WSResponse { results: vec![format!("{:X}", size)]}).unwrap())).await?;
+
+                        /* Send data */
                         while received_len < size {
                             if let Some(data) = receiver.recv().await {
                                 received_len += data.len();                                
@@ -114,7 +135,7 @@ async fn handle_client(manager: Arc<RwLock<Manager>>, peer: SocketAddr, stream: 
                                 /* Incoming text command, parse it and make sure it's a valid command */
                                 if let Ok(ws_request) = serde_json::from_str::<WSRequest>(&txt) {
                                     if let Ok(request) = Request::from_wsrequest(&ws_request) {
-                                        println!("Valid request received: {:?}", &request);
+                                        println!("Request received: {:?}", &request);
                                         client.state = handle_request(request, &manager, &mut write, &mut client).await?;
                                     } else {
                                         Err("The request is not a valid USB2SNES request.")?
@@ -123,8 +144,13 @@ async fn handle_client(manager: Arc<RwLock<Manager>>, peer: SocketAddr, stream: 
                                     Err("The request is not in JSON format or does not include the required fields.")?
                                 }
                             },
-                            Message::Binary(data) => {
+                            Message::Binary(mut data) => {
                                 if let ClientState::SendingData((mut remaining, ref sender)) = client.state {
+                                    
+                                    if data.len() > remaining {
+                                        data = data[..remaining].to_vec();
+                                    }
+                                    
                                     remaining -= data.len();
                                     sender.send(data).await.unwrap();
                                     if remaining > 0 {

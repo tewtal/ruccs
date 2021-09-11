@@ -17,7 +17,8 @@ pub enum DeviceResponse {
     Strings(Vec<String>),
     BinaryWriter((usize, Sender<Vec<u8>>)),
     BinaryReader((usize, Receiver<Vec<u8>>)),
-    Nothing
+    FileReader((usize, Receiver<Vec<u8>>)),
+    Empty
 }
 
 #[allow(dead_code)]

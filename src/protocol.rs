@@ -1,3 +1,4 @@
+use futures::stream::ReadyChunks;
 /* USB2SNES Protocol Definitions */
 use serde::{Serialize, Deserialize};
 use std::str::FromStr;
@@ -28,7 +29,31 @@ pub enum Opcode {
     TIME,
 
     // response
-    RESPONSE,    
+    RESPONSE,
+
+    //
+    NONE
+}
+
+impl Opcode {
+    pub fn from_request(req: &Request) -> Opcode {
+        match &req.command {
+            Command::Info => Opcode::INFO,
+            Command::Boot(_) => Opcode::BOOT,
+            Command::Menu => Opcode::MENU_RESET,
+            Command::Reset => Opcode::RESET,
+            Command::Stream => Opcode::STREAM,
+            Command::GetAddress(a) => if a.len() == 1 { Opcode::GET } else { Opcode::VGET },
+            Command::PutAddress(a) => if a.len() == 1 { Opcode::PUT } else { Opcode::VPUT },
+            Command::GetFile(_) => Opcode::GET,
+            Command::PutFile(_) => Opcode::PUT,
+            Command::List(_) => Opcode::LS,
+            Command::Remove(_) => Opcode::RM,
+            Command::Rename(_) => Opcode::MV,
+            Command::MakeDir(_) => Opcode::MKDIR,
+            _ => Opcode::NONE
+        }
+    }
 }
 
 #[allow(dead_code, non_camel_case_types)]
@@ -141,7 +166,7 @@ pub enum Command {
     PutAddress(Vec<AddressInfo>),
     PutIPS,
     GetFile(String),
-    PutFile((String, i64)),
+    PutFile((String, usize)),
     List(String),
     Remove(String),
     Rename((String, String)),
@@ -175,7 +200,7 @@ impl Request {
             "PutAddress" if operands.len() >= 2 => Command::PutAddress(AddressInfo::from_operands(operands)?),
             "PutIPS" => Command::PutIPS,
             "GetFile" if operands.len() == 1 => Command::GetFile(operands[0].to_string()),
-            "PutFile" if operands.len() == 2 => Command::PutFile((operands[0].to_string(), i64::from_str(&operands[1])?)),
+            "PutFile" if operands.len() == 2 => Command::PutFile((operands[0].to_string(), usize::from_str_radix(&operands[1], 16)?)),
             "List" if operands.len() == 1 => Command::List(operands[0].to_string()),
             "Remove" if operands.len() == 1 => Command::Remove(operands[0].to_string()),
             "Rename" if operands.len() == 2 => Command::Rename((operands[0].to_string(), operands[1].to_string())),
