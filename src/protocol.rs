@@ -1,4 +1,4 @@
-use futures::stream::ReadyChunks;
+
 /* USB2SNES Protocol Definitions */
 use serde::{Serialize, Deserialize};
 use std::str::FromStr;

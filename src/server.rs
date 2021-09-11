@@ -1,6 +1,6 @@
 use futures::{SinkExt, StreamExt};
 use futures::future::join_all;
-use qt_core::Receiver;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -9,7 +9,7 @@ use futures::stream::SplitSink;
 use tokio_tungstenite::{accept_async, WebSocketStream};
 use tokio_tungstenite::tungstenite::Message;
 use tungstenite::{Result};
-use serde_json::{self, json};
+use serde_json::{self};
 use crate::manager::{Manager};
 use crate::protocol::{WSRequest, WSResponse, Request, Command};
 use crate::devices::device::DeviceResponse;
