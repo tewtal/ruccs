@@ -41,7 +41,7 @@ async fn handle_request(request: Request, manager: &Arc<RwLock<Manager>>, write:
         },
         (Command::Name(name), _) => {
             client.name = name.to_string();
-            Some(vec![])
+            None
         },
 
         /* As long as we're attached to a device, pass any remaining commands through to the device manager so it can be 
@@ -57,21 +57,18 @@ async fn handle_request(request: Request, manager: &Arc<RwLock<Manager>>, write:
                 match response {
                     DeviceResponse::Strings(s) => Some(s),
                     DeviceResponse::BinaryReader((size, mut receiver)) => {
-                        
-                        /* This is an easy case, we just stream the data coming from the device directly to the websocket */
+                        /* Forward binary data from the device to the websocket */
                         let mut received_len = 0;
-                        let mut received_data: Vec<u8> = Vec::new();
+                        
                         while received_len < size {
                             if let Some(data) = receiver.recv().await {
-                                received_len += data.len();
-                                received_data.extend(&data);
+                                received_len += data.len();                                
                                 write.send(Message::Binary(data)).await?;
                             } else {
                                 /* Received nothing from the channel, possibly channel broke? */
                                 Err("Could not read binary data from the device")?
                             }
                         }
-                        write.flush().await?;
                         None
                     },
                     DeviceResponse::BinaryWriter(send_data_info) => {
@@ -120,10 +117,10 @@ async fn handle_client(manager: Arc<RwLock<Manager>>, peer: SocketAddr, stream: 
                                         println!("Valid request received: {:?}", &request);
                                         client.state = handle_request(request, &manager, &mut write, &mut client).await?;
                                     } else {
-                                        break;
+                                        Err("The request is not a valid USB2SNES request.")?
                                     }
                                 } else {
-                                    break;
+                                    Err("The request is not in JSON format or does not include the required fields.")?
                                 }
                             },
                             Message::Binary(data) => {
@@ -141,10 +138,11 @@ async fn handle_client(manager: Arc<RwLock<Manager>>, peer: SocketAddr, stream: 
                         }
                     },
                     Some(Err(e)) => {
-                        println!("Error in WS thing: {:?}", e);
+                        println!("Error parsing websocket message: {:?}", e);
+                        break
                     },
                     None => {
-                        println!("None command");
+                        println!("The connection was closed by the remote peer.");
                         break
                     }
                 }
@@ -158,7 +156,6 @@ async fn handle_client(manager: Arc<RwLock<Manager>>, peer: SocketAddr, stream: 
 /* Starts the tokio tcp listeners for the ports we want to listen to */
 pub async fn run_server(manager: Arc<RwLock<Manager>>)
 {
-    println!("Run_server");
     let ports = vec![23074, 8080];
     let mut handles = Vec::new();
     for port in ports {

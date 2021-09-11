@@ -62,7 +62,21 @@ impl Lua {
                                         let response = DeviceResponse::BinaryReader((addr_info[0].size as usize, rx));
                                         sender.send(response).unwrap();
                                         tx.send(vec![0u8; addr_info[0].size as usize]).await.unwrap();                                        
-                                    }
+                                    },
+                                    Command::PutAddress(addr_info) => {
+                                        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+                                        let response = DeviceResponse::BinaryWriter((addr_info[0].size as usize, tx));
+                                        sender.send(response).unwrap();
+                                        let mut remaining = addr_info[0].size as usize;
+                                        while remaining > 0 {
+                                            if let Some(data) = rx.recv().await {
+                                                remaining -= data.len();
+                                                stream.write(&data).await.unwrap();
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    },
                                     _ => sender.send(DeviceResponse::Nothing).unwrap()
                                 }
                             },
@@ -100,7 +114,7 @@ impl LuaManager {
         
         tokio::spawn(async move {
             let (lua_manager_tx, mut lua_manager_rx) = tokio::sync::mpsc::channel(32);
-            let listener = TcpListener::bind("127.0.0.1:4141").await.unwrap();
+            let listener = TcpListener::bind("127.0.0.1:65398").await.unwrap();
     
             loop {
                 tokio::select! {

@@ -1,16 +1,14 @@
-use std::collections::HashMap;
-
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
 use tokio_serial::{self, SerialPortInfo, SerialStream};
 use serialport::SerialPortType;
 use tokio::sync::mpsc::{Sender, channel};
+use std::collections::HashMap;
 use uuid::Uuid;
-
 
 use crate::devices::device::{DeviceRequest, DeviceResponse, Device, DeviceInfo, DeviceManagerCommand};
 use crate::manager::ManagerInfo;
-use crate::protocol::{self, Space, Flags, Opcode};
+use crate::protocol::{self, AddressInfo, Flags, Opcode, Space};
 
 
 
@@ -23,55 +21,179 @@ pub struct SD2Snes {
     block_size: usize
 }
 
+pub enum CommandArg<'a> {
+    AddressList(&'a Vec<AddressInfo>),
+    _Filename(String),
+    None
+}
+
 impl SD2Snes {
+
+    pub fn new(id: Uuid, port_name: &str, stream: SerialStream) -> Self
+    {
+        Self {
+            id,
+            port_name: port_name.to_string(),
+            stream,
+            name: format!("{}", port_name),
+            block_size: 512
+        }
+    }
     
+    pub fn pad_size(&self, size: usize, block_size: usize) -> usize {
+        ((size as f64 / block_size as f64).ceil() as usize) * block_size
+    }
+
     fn pad_or_truncate(&self, data: &[u8]) -> Vec<u8> {
         self.pad_or_truncate_size(self.block_size, data)
     }
 
     fn pad_or_truncate_size(&self, block_size: usize, data: &[u8]) -> Vec<u8> {
-        let pad_size = ((data.len() as f64 / block_size as f64).ceil() as usize) * block_size;
+        let pad_size = self.pad_size(data.len(), block_size);
         if data.len() < pad_size {
             let mut padded_data = data.to_vec();
             padded_data.extend(vec![0u8; pad_size - data.len()]);
             padded_data
         } else {
-            data[..pad_size].to_vec()
+            let truncate_size = ((data.len() as f64 / block_size as f64).floor() as usize) * block_size;
+            data[..truncate_size].to_vec()
         }
     }
 
-    pub async fn write_data(&mut self, data: &[u8]) {
-        let padded_data = self.pad_or_truncate(data);
-        for chunk in padded_data.chunks(self.block_size) {
-            self.stream.write_all(chunk).await.unwrap(); // Error handling
+    pub fn clear_read_buffer(&mut self) {
+        let mut tmp = vec![0u8; 512];
+        let mut clear = false;
+        while !clear {
+            clear = match self.stream.try_read(&mut tmp) {
+                Ok(_) => false,
+                Err(_) => true
+            };
         }
     }
 
+    /* Writes data to the sd2snes in <block_size> chunks */
+    pub async fn write_data(&mut self, data: &[u8], block_size: usize) {
+        for chunk in data.chunks(block_size) {
+            self.stream.write_all(chunk).await.unwrap();
+        }
+    }
+
+    /* Reads <len> bytes of data from the sd2snes */
     pub async fn read_data(&mut self, len: usize) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(len);
-        let mut read_len = 0;
+        let mut read_len = 0;        
+        let mut data = Vec::new();
+        
         while read_len < len {
-            let buf_len = self.stream.read_buf(&mut buf).await.unwrap();
-            read_len += buf_len;
+            let read_size = if (len - read_len) < 4096 { len - read_len } else { 4096 };
+            let mut buf = vec![0u8; read_size];
+            let bytes = self.stream.read(&mut buf).await.unwrap();
+            read_len += bytes;
+            data.extend(buf);
         }
-        buf
+
+        data
     }
 
-    pub async fn send_command(&mut self, opcode: Opcode, space: Space, flags: Flags, _args: &[u8]) -> Vec<u8> {
-        let header = self.pad_or_truncate_size(256, &vec![b'U', b'S', b'B', b'A', opcode as u8, space as u8, flags.clone() as u8]);
-        let data = self.pad_or_truncate(&header);
+    /* Streams <len> bytes of data from the sd2snes to a channel sender */
+    /* This ignores any errors caused by the remote channel not being available, so that the correct */
+    /* amount of data is always read from the sd2snes */
+
+    pub async fn read_stream(&mut self, tx: Sender<Vec<u8>>, padded_size: usize, data_size: usize) -> usize {
+        let mut read_len = 0;        
         
-        if (flags as u8) & (Flags::NORESP as u8) != 0 {
+        while read_len < padded_size {
+            let read_size = if (padded_size - read_len) < 4096 { padded_size - read_len } else { 4096 };
+            let mut buf = vec![0u8; read_size];
+            let bytes = self.stream.read(&mut buf).await.unwrap();
+            if bytes > 0 {
+                if (read_len + bytes) > data_size {
+                    let _ = tx.send(buf[..(bytes - ((read_len + bytes) - data_size))].to_vec()).await;
+                } else {
+                    let _ = tx.send(buf[..bytes].to_vec()).await;
+                }
+                read_len += bytes;
+            }
+        }
+
+        /* Wait for receiver to finish reading fully before resuming and potentially dropping the sender */
+        tx.closed().await;
+
+        read_len
+    }
+
+    /* Streams <data_size> bytes read from the receiver, with padding added to <padded_size> */
+    pub async fn write_stream(&mut self, rx: &mut Receiver<Vec<u8>>, padded_size: usize, data_size: usize, block_size: usize) -> usize {
+        let mut write_len = 0;
+
+        /* Write all data coming from the websocket channel */
+        while write_len < data_size {
+            if let Some(data) = rx.recv().await {
+                println!("Got data from WS: {:?}/{:?}", data.len(), data_size);
+                self.write_data(&data, block_size).await;
+                write_len += data.len();
+            } else {
+                /* If there's an error receiving data on the channel, we break and then let the padding fill to the correct amount */
+                break;
+            }
+        }
+
+        /* Write padding if needed */
+        if write_len < padded_size {
+            let padding = vec![0u8; padded_size - write_len];
+            self.stream.write_all(&padding).await.unwrap();
+            write_len += padding.len();
+        }
+
+        write_len
+    }
+
+    /* Prepares and sends a command to the sd2snes from the given set of parameters */
+    pub async fn send_command(&mut self, opcode: Opcode, space: Space, flags: Flags, args: CommandArg<'_>) -> Vec<u8> {        
+        let mut buf = self.pad_or_truncate_size(256, &vec![b'U', b'S', b'B', b'A', opcode as u8, space as u8, flags.bits()]);
+
+        match (space, opcode, args) {
+            (Space::SNES | Space::CMD | Space::MSU, Opcode::GET | Opcode::PUT, CommandArg::AddressList(addr_list)) => {
+                let (addr, size) = (addr_list[0].orig_address, addr_list[0].size);
+                buf[252] = ((size >> 24) & 0xFF) as u8;
+                buf[253] = ((size >> 16) & 0xFF) as u8;
+                buf[254] = ((size >> 8) & 0xFF) as u8;
+                buf[255] = (size & 0xFF) as u8;
+
+                buf = self.pad_or_truncate(&buf);
+                buf[256] = ((addr >> 24) & 0xFF) as u8;
+                buf[257] = ((addr >> 16) & 0xFF) as u8;
+                buf[258] = ((addr >> 8) & 0xFF) as u8;
+                buf[259] = (addr & 0xFF) as u8;
+            },
+            (Space::SNES | Space::CMD | Space::MSU, Opcode::VGET | Opcode::VPUT, CommandArg::AddressList(addr_list)) => {
+                buf = buf[..64].to_vec();
+                for (i, ai) in addr_list.iter().enumerate() {
+                    buf[32 + (i*4)] = (ai.size & 0xFF) as u8;
+                    buf[33 + (i*4)] = ((ai.orig_address >> 16) & 0xFF) as u8;
+                    buf[34 + (i*4)] = ((ai.orig_address >> 8) & 0xFF) as u8;
+                    buf[35 + (i*4)] = (ai.orig_address & 0xFF) as u8;                    
+                }
+            }
+            _ => { buf = self.pad_or_truncate(&buf); }
+        }
+
+        /* Read out any remaining data in the read buffer */
+        self.clear_read_buffer();
+        
+        /* Send command to sd2snes */
+        self.write_data(&buf, buf.len()).await;
+
+        if flags.contains(Flags::NORESP) {
             Vec::new()
         } else {
-            self.write_data(&data).await;
             let response = self.read_data(512).await;
             response    
         }
     }
 
+    /* Sends and parses an "Info" request */
     pub async fn get_information(&mut self) -> Vec<String> {
-        let data = self.send_command(Opcode::INFO, Space::SNES, Flags::NONE, &vec![]).await;
+        let data = self.send_command(Opcode::INFO, Space::SNES, Flags::NONE, CommandArg::None).await;
         let str_data = String::from_utf8_lossy(&data[16..]).to_string();
         let split_data: Vec<&str> = str_data.split_terminator('\0').filter(|s| s != &"").collect();
         let mut info = Vec::new();                                                                                
@@ -94,23 +216,13 @@ impl SD2Snes {
         info
     }
 
-    pub fn new(id: Uuid, port_name: &str, stream: SerialStream) -> Self
-    {
-        Self {
-            id,
-            port_name: port_name.to_string(),
-            stream,
-            name: format!("SD2SnesDevice {} {}", port_name, id),
-            block_size: 512
-        }
-    }
-
     async fn start(id: Uuid, port_name: &str, _snes_manager_tx: Sender<(String, DeviceInfo)>) -> Device {
         let stream = tokio_serial::SerialStream::open(&tokio_serial::new(port_name, 115200)).unwrap();
         let mut sd2snes = SD2Snes::new(id, port_name, stream);
 
         /* The main communication channel for this specific device, all clients will have to go through this to use the device */
-        let (device_tx, mut device_rx) = channel(128); // (Not sure about what's a reasonable size here)
+        /* The channel buffer is set to 1 since that's the maximum limit of commands the device can handle at a time. */
+        let (device_tx, mut device_rx) = channel(1); 
 
         let device = Device {          
             id,  
@@ -130,11 +242,66 @@ impl SD2Snes {
                                         sender.send(response).unwrap()
                                     },
                                     protocol::Command::GetAddress(addr_info) => {
-                                        let (tx, rx) = tokio::sync::mpsc::channel(32);                                        
-                                        let response = DeviceResponse::BinaryReader((addr_info[0].size as usize, rx));
+                                        
+                                        /* Send a response back directly with a binary channel that will be used to push data that 
+                                           gets read from the sd2snes */                                           
+                                        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+                                        /* GET or VGET? */
+                                        let opcode = if addr_info.len() == 1 { Opcode::GET } else { Opcode::VGET };
+
+                                        /* Calculate the total size and padded size of all requests */
+                                        let (data_size, padded_size) = if opcode == Opcode::GET { 
+                                            (addr_info[0].size as usize, sd2snes.pad_size(addr_info[0].size as usize, 512))
+                                        } else {
+                                            (addr_info.iter().map(|a| a.size as usize).sum(), (addr_info.iter().map(|a| sd2snes.pad_size(a.size as usize, 64)).sum()))
+                                        };
+                                        
+                                        /* Create and send response */
+                                        let response = DeviceResponse::BinaryReader((data_size, rx));
                                         sender.send(response).unwrap();
-                                        tx.send(vec![0u8; addr_info[0].size as usize]).await.unwrap();                                        
-                                    }
+
+                                        /* Set flags depending on opcode and so on, NORESP is set to not have to care about a response since it's redundant */
+                                        let flags = req.flags.unwrap_or(Flags::NONE) | Flags::NORESP | if opcode == Opcode::VGET { Flags::DATA64B } else { Flags::NONE };
+                                        
+                                        /* Send command to device to begin sending data */
+                                        let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&addr_info)).await;
+
+                                        /* Read data to the end */
+                                        let result = sd2snes.read_stream(tx, padded_size, data_size).await;
+                                        
+                                        println!("GetAddress Complete: Sent {:?}({:?}) - Received: {:?}", padded_size, data_size, result);                                        
+
+                                    },
+                                    protocol::Command::PutAddress(addr_info) => {
+                                        /* Send a response back directly with a binary channel that will be used to write data to the sd2snes */
+                                        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+
+                                        /* PUT or VPUT? */
+                                        let (opcode, block_size) = if addr_info.len() == 1 { (Opcode::PUT, 512) } else { (Opcode::VPUT, 64) };
+
+                                         /* Calculate the total size and padded size of all requests */
+                                        let (data_size, padded_size) = if opcode == Opcode::PUT { 
+                                            (addr_info[0].size as usize, sd2snes.pad_size(addr_info[0].size as usize, block_size))
+                                        } else {
+                                            (addr_info.iter().map(|a| a.size as usize).sum(), sd2snes.pad_size(addr_info.iter().map(|a| a.size as usize).sum(), block_size))
+                                        };                                       
+
+                                        /* Create and send response */
+                                        let response = DeviceResponse::BinaryWriter((data_size, tx));
+                                        sender.send(response).unwrap();
+
+                                        /* Set flags depending on opcode and so on, NORESP is set to not have to care about a response since it's redundant */
+                                        let flags = req.flags.unwrap_or(Flags::NONE) | Flags::NORESP | if opcode == Opcode::VPUT { Flags::DATA64B } else { Flags::NONE };
+                                        
+                                        /* Send command to device to begin reading data */
+                                        let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&addr_info)).await;
+
+                                        /* Start reading from the input stream and write to the sd2snes */
+                                        let result = sd2snes.write_stream(&mut rx, padded_size, data_size, block_size).await;
+
+                                        println!("PutAddress Complete: Got {:?}({:?}) - Sent: {:?}", padded_size, data_size, result);
+                                    },
                                     _ => sender.send(DeviceResponse::Nothing).unwrap()
                                 }                                
                             },
