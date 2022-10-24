@@ -111,7 +111,6 @@ impl SD2Snes {
             let read_size = if (padded_size - read_len) < 4096 { padded_size - read_len } else { 4096 };
             let mut buf = vec![0u8; read_size];
             let bytes = self.stream.read(&mut buf).await.unwrap();
-            println!("Read Size: {:?}, Read Len: {:?}, Bytes: {:?}, Data Size: {:?}", read_size, read_len, bytes, data_size);
             if bytes > 0 {
                 if read_len > data_size {
                     /* We've already sent the relevant data to the target, do nothing and read more from the device */
@@ -120,6 +119,7 @@ impl SD2Snes {
                 } else {
                     let _ = tx.send(buf[..bytes].to_vec()).await;
                 }
+                read_len += bytes;
             }
         }
 
@@ -318,9 +318,9 @@ impl SD2Snes {
 
                                         /* Calculate the total size and padded size of all requests */
                                         let (data_size, padded_size) = if opcode == Opcode::GET { 
-                                            (addr_info[0].size as usize, sd2snes.pad_size(addr_info[0].size as usize, 512))
+                                            (addr_info.iter().map(|a| a.size as usize).sum(), (addr_info.iter().map(|a| sd2snes.pad_size(a.size as usize, block_size)).sum()))
                                         } else {
-                                            (addr_info.iter().map(|a| a.size as usize).sum(), (addr_info.iter().map(|a| sd2snes.pad_size(a.size as usize, 64)).sum()))
+                                            (addr_info.iter().map(|a| a.size as usize).sum(), sd2snes.pad_size(addr_info.iter().map(|a| a.size as usize).sum(), block_size))
                                         };
                                         
                                         /* Create and send response */
@@ -330,11 +330,21 @@ impl SD2Snes {
                                         /* Set flags depending on opcode and so on, NORESP is set to not have to care about a response since it's redundant */
                                         let flags = req.flags.unwrap_or(Flags::NONE) | Flags::NORESP | if opcode == Opcode::VGET { Flags::DATA64B } else { Flags::NONE };
                                         
-                                        /* Send command to device to begin sending data */
-                                        let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&addr_info)).await;
-
-                                        /* Read data to the end */
-                                        let _ = sd2snes.read_stream(tx, padded_size, data_size).await;
+                                        /* 
+                                            Send command and read data, only once if there's a valid VGET command, otherwise we loop single GET requests
+                                            until all address+size pairs have been handled */
+                                        if opcode == Opcode::VGET {                                            
+                                            let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&addr_info)).await;
+                                            let _ = sd2snes.read_stream(tx, padded_size, data_size).await;
+                                        } else {
+                                            for ai in &addr_info {
+                                                let ltx = tx.clone();
+                                                let cur_data_size = ai.size as usize;
+                                                let cur_padded_size = sd2snes.pad_size(ai.size as usize, 512);
+                                                let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&vec![ai.clone()])).await;
+                                                let _ = sd2snes.read_stream(ltx, cur_padded_size, cur_data_size).await;
+                                            }
+                                        }
                                         
                                         let elapsed = start.elapsed();
                                         let kbps = ((data_size as f64) / 1024f64) / elapsed.as_secs_f64();
@@ -347,23 +357,34 @@ impl SD2Snes {
 
                                          /* Calculate the total size and padded size of all requests */
                                         let (data_size, padded_size) = if opcode == Opcode::PUT { 
-                                            (addr_info[0].size as usize, sd2snes.pad_size(addr_info[0].size as usize, block_size))
+                                            (addr_info.iter().map(|a| a.size as usize).sum(), (addr_info.iter().map(|a| sd2snes.pad_size(a.size as usize, block_size)).sum()))
                                         } else {
                                             (addr_info.iter().map(|a| a.size as usize).sum(), sd2snes.pad_size(addr_info.iter().map(|a| a.size as usize).sum(), block_size))
-                                        };                                       
-
+                                        };
+                                        
                                         /* Create and send response */
                                         let response = DeviceResponse::BinaryWriter((data_size, tx));
                                         sender.send(response).unwrap();
 
                                         /* Set flags depending on opcode and so on, NORESP is set to not have to care about a response since it's redundant */
                                         let flags = req.flags.unwrap_or(Flags::NONE) | Flags::NORESP | if opcode == Opcode::VPUT { Flags::DATA64B } else { Flags::NONE };
-                                        
-                                        /* Send command to device to begin reading data */
-                                        let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&addr_info)).await;
 
-                                        /* Start reading from the input stream and write to the sd2snes */
-                                        let result = sd2snes.write_stream(&mut rx, padded_size, data_size, block_size).await;
+                                        /*  Send command and read data, only once if there's a valid VPUT command, otherwise we loop single PUT requests
+                                            until all address+size pairs have been handled */
+
+                                        let result = if opcode == Opcode::VPUT {                                            
+                                            let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&addr_info)).await;
+                                            sd2snes.write_stream(&mut rx, padded_size, data_size, block_size).await
+                                        } else {
+                                            let mut write_size = 0;
+                                            for ai in &addr_info {
+                                                let cur_data_size = ai.size as usize;
+                                                let cur_padded_size = sd2snes.pad_size(ai.size as usize, block_size);
+                                                let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&vec![ai.clone()])).await;
+                                                write_size += sd2snes.write_stream(&mut rx, cur_padded_size, cur_data_size, block_size).await;
+                                            }
+                                            write_size
+                                        };
 
                                         println!("PutAddress Complete: Got {:?}({:?}) - Sent: {:?}", padded_size, data_size, result);
                                     },

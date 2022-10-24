@@ -117,14 +117,14 @@ pub enum FileType {
 }
 
 #[allow(dead_code, non_camel_case_types)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MemoryDomain {
     WRAM,
     CARTROM,
     CARTRAM
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AddressInfo {
     pub domain: MemoryDomain,
     pub address: i64,
