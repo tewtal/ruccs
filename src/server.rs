@@ -37,7 +37,7 @@ async fn handle_request(request: Request, manager: &Arc<RwLock<Manager>>, write:
             if let Some((id, _)) = manager.read().await.get_device(device_name) {
                 client.device_id = Some(*id);
             } else {
-                Err("Invalid device name")?                
+                return Err("Invalid device name".into())
             }
             None
         },
@@ -68,7 +68,7 @@ async fn handle_request(request: Request, manager: &Arc<RwLock<Manager>>, write:
                                 write.send(Message::Binary(data)).await?;
                             } else {
                                 /* Received nothing from the channel, possibly channel broke? */
-                                Err("Could not read binary data from the device")?
+                                return Err("Could not read binary data from the device".into())
                             }
                         }
                         None
@@ -87,7 +87,7 @@ async fn handle_request(request: Request, manager: &Arc<RwLock<Manager>>, write:
                                 write.send(Message::Binary(data)).await?;
                             } else {
                                 /* Received nothing from the channel, possibly channel broke? */
-                                Err("Could not read binary data from the device")?
+                                return Err("Could not read binary data from the device".into())
                             }
                         }
                         None
@@ -138,10 +138,10 @@ async fn handle_client(manager: Arc<RwLock<Manager>>, peer: SocketAddr, stream: 
                                         println!("Request received: {:?}", &request);
                                         client.state = handle_request(request, &manager, &mut write, &mut client).await?;
                                     } else {
-                                        Err("The request is not a valid USB2SNES request.")?
+                                        return Err("The request is not a valid USB2SNES request.".into())
                                     }
                                 } else {
-                                    Err("The request is not in JSON format or does not include the required fields.")?
+                                    return Err("The request is not in JSON format or does not include the required fields.".into())
                                 }
                             },
                             Message::Binary(mut data) => {

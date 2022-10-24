@@ -43,8 +43,8 @@ impl Opcode {
             Command::Menu => Opcode::MENU_RESET,
             Command::Reset => Opcode::RESET,
             Command::Stream => Opcode::STREAM,
-            Command::GetAddress(a) => if a.len() == 1 { Opcode::GET } else { Opcode::VGET },
-            Command::PutAddress(a) => if a.len() == 1 { Opcode::PUT } else { Opcode::VPUT },
+            Command::GetAddress(a) => if a.len() == 1 && a[0].size >= 256 { Opcode::GET } else { Opcode::VGET },
+            Command::PutAddress(a) => if a.len() == 1 && a[0].size >= 256 { Opcode::PUT } else { Opcode::VPUT },
             Command::GetFile(_) => Opcode::GET,
             Command::PutFile(_) => Opcode::PUT,
             Command::List(_) => Opcode::LS,
@@ -138,7 +138,7 @@ impl AddressInfo {
         let size_int = i64::from_str_radix(size, 16)?;
         Ok(match address_int {
             a if a < 0xE00000 => AddressInfo { domain: MemoryDomain::CARTROM, orig_address: a, address: a, size: size_int },
-            a if a >= 0xE00000 && a < 0xF50000 => AddressInfo { domain: MemoryDomain::CARTRAM, orig_address: a, address: a - 0xE00000, size: size_int },
+            a if (0xE00000..0xF50000).contains(&a) => AddressInfo { domain: MemoryDomain::CARTRAM, orig_address: a, address: a - 0xE00000, size: size_int },
             a => AddressInfo { domain: MemoryDomain::WRAM, orig_address: a, address: a - 0xF50000, size: size_int },
         })
     }
@@ -205,12 +205,12 @@ impl Request {
             "Remove" if operands.len() == 1 => Command::Remove(operands[0].to_string()),
             "Rename" if operands.len() == 2 => Command::Rename((operands[0].to_string(), operands[1].to_string())),
             "MakeDir" if operands.len() == 1 => Command::MakeDir(operands[0].to_string()),
-            _ => Err("Invalid Opcode")?
+            _ => return Err("Invalid Opcode".into())
         };
 
         let req = Request {
             command,
-            space: Space::from_str(&wr.space)?,
+            space: Space::from_str(&wr.space.as_ref().unwrap_or(&"SNES".into()))?,
             flags: match &wr.flags {
                 Some(fl) => fl.iter().map(|f| Flags::from_str(f).unwrap_or(Flags::NONE)).reduce(|a, b| a | b),                
                 None => None
@@ -226,7 +226,7 @@ pub struct WSRequest {
     #[serde(rename="Opcode")]
     opcode: String,
     #[serde(rename="Space")]
-    space: String,
+    space: Option<String>,
     #[serde(rename="Flags")]
     flags: Option<Vec<String>>,
     #[serde(rename="Operands")]

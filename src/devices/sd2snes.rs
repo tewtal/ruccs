@@ -1,9 +1,10 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
 use tokio_serial::{self, SerialPortInfo, SerialStream};
-use serialport::SerialPortType;
+use serialport::{SerialPort, SerialPortType};
 use tokio::sync::mpsc::{Sender, channel};
 use std::collections::HashMap;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::devices::device::{DeviceRequest, DeviceResponse, Device, DeviceInfo, DeviceManagerCommand};
@@ -37,7 +38,7 @@ impl SD2Snes {
             id,
             port_name: port_name.to_string(),
             stream,
-            name: format!("{}", port_name),
+            name: format!("SD2SNES {}", port_name),
             block_size: 512
         }
     }
@@ -62,14 +63,14 @@ impl SD2Snes {
         }
     }
 
+    /* Attempts to read from the device until there's nothing left to read
+       so that the read buffer gets cleared out
+     */
     pub fn clear_read_buffer(&mut self) {
         let mut tmp = vec![0u8; 512];
         let mut clear = false;
         while !clear {
-            clear = match self.stream.try_read(&mut tmp) {
-                Ok(_) => false,
-                Err(_) => true
-            };
+            clear = self.stream.try_read(&mut tmp).is_err();
         }
     }
 
@@ -78,6 +79,8 @@ impl SD2Snes {
         for chunk in data.chunks(block_size) {
             self.stream.write_all(chunk).await.unwrap();
         }
+
+        let _ = self.stream.flush().await;
     }
 
     /* Reads <len> bytes of data from the sd2snes */
@@ -89,8 +92,10 @@ impl SD2Snes {
             let read_size = if (len - read_len) < 4096 { len - read_len } else { 4096 };
             let mut buf = vec![0u8; read_size];
             let bytes = self.stream.read(&mut buf).await.unwrap();
-            read_len += bytes;
-            data.extend(buf);
+            if bytes > 0 {
+                read_len += bytes;
+                data.extend(buf);        
+            }
         }
 
         data
@@ -99,21 +104,33 @@ impl SD2Snes {
     /* Streams <len> bytes of data from the sd2snes to a channel sender */
     /* This ignores any errors caused by the remote channel not being available, so that the correct */
     /* amount of data is always read from the sd2snes */
-
     pub async fn read_stream(&mut self, tx: Sender<Vec<u8>>, padded_size: usize, data_size: usize) -> usize {
         let mut read_len = 0;
-                
-        while read_len < padded_size {
-            let read_size = if (padded_size - read_len) < 4096 { padded_size - read_len } else { 4096 };
-            let mut buf = vec![0u8; read_size];
-            let bytes = self.stream.read(&mut buf).await.unwrap();
-            if bytes > 0 {
-                if (read_len + bytes) > data_size {
-                    let _ = tx.send(buf[..(bytes - ((read_len + bytes) - data_size))].to_vec()).await;
-                } else {
-                    let _ = tx.send(buf[..bytes].to_vec()).await;
+        let mut buf = vec![0u8; 4096];
+
+        let n = Instant::now();
+        while read_len < padded_size {            
+            //let bytes = self.stream.read(&mut buf).await.unwrap();
+            let i = Instant::now();
+            let bytes = self.stream.try_read(&mut buf);
+            match bytes {
+                Ok(bytes) => {
+                    println!("try_read took: {:?} us, (total: {:?} us) {:?} bytes", i.elapsed().as_micros(), n.elapsed().as_micros(), bytes);
+                    if bytes > 0 {
+                        if (read_len + bytes) > data_size {
+                            let _ = tx.send(buf[..(bytes - ((read_len + bytes) - data_size))].to_vec()).await;
+                        } else {
+                            let _ = tx.send(buf[..bytes].to_vec()).await;
+                        }
+                        read_len += bytes;
+                    }
+                },
+                Err(e) => {
+                    match e.kind() {
+                        std::io::ErrorKind::WouldBlock => (),
+                        _ => break
+                    }
                 }
-                read_len += bytes;
             }
         }
 
@@ -150,7 +167,7 @@ impl SD2Snes {
 
     /* Prepares and sends a command to the sd2snes from the given set of parameters */
     pub async fn send_command(&mut self, opcode: Opcode, space: Space, flags: Flags, args: CommandArg<'_>) -> Option<Vec<u8>> {        
-        let mut buf = self.pad_or_truncate_size(256, &vec![b'U', b'S', b'B', b'A', opcode as u8, space as u8, flags.bits()]);
+        let mut buf = self.pad_or_truncate_size(256, &[b'U', b'S', b'B', b'A', opcode as u8, space as u8, flags.bits()]);
 
         match (space, opcode, args) {
             (Space::SNES | Space::CMD | Space::MSU, Opcode::GET | Opcode::PUT, CommandArg::AddressList(addr_list)) => {
@@ -195,7 +212,7 @@ impl SD2Snes {
             _ => { buf = self.pad_or_truncate(&buf); }
         }
 
-        /* Read out any remaining data in the read buffer */
+        /* Read out any remaining data from the device */
         self.clear_read_buffer();
         
         /* Send command to sd2snes */
@@ -212,9 +229,8 @@ impl SD2Snes {
     pub async fn get_information(&mut self) -> Vec<String> {
         let data = self.send_command(Opcode::INFO, Space::SNES, Flags::NONE, CommandArg::None).await.unwrap();
         let str_data = String::from_utf8_lossy(&data[16..]).to_string();
-        let split_data: Vec<&str> = str_data.split_terminator('\0').filter(|s| s != &"").collect();
-        let mut info = Vec::new();                                                                                
-        info.push(split_data[1][4..].to_string());
+        let split_data: Vec<&str> = str_data.split_terminator('\0').filter(|s| s != &"").collect();        
+        let mut info = vec![split_data[1][6..].to_string()];
         let v = (i64::from(data[256]) << 24) | (i64::from(data[257]) << 16) | (i64::from(data[258]) << 8) | i64::from(data[259]);
         info.push(format!("{:X}", v));
         info.push(split_data[0].to_string());
@@ -234,7 +250,10 @@ impl SD2Snes {
     }
 
     async fn start(id: Uuid, port_name: &str, _snes_manager_tx: Sender<(String, DeviceInfo)>) -> Device {
-        let stream = tokio_serial::SerialStream::open(&tokio_serial::new(port_name, 115200)).unwrap();
+        let mut stream = tokio_serial::SerialStream::open(&tokio_serial::new(port_name, 921600)).unwrap();
+        stream.write_data_terminal_ready(true).unwrap();
+        stream.set_flow_control(serialport::FlowControl::None).unwrap();
+
         let mut sd2snes = SD2Snes::new(id, port_name, stream);
 
         /* The main communication channel for this specific device, all clients will have to go through this to use the device */
@@ -302,6 +321,7 @@ impl SD2Snes {
                                         let _ = sender.send(response);                                        
                                     }
                                     protocol::Command::GetAddress(addr_info) => {
+                                        let start = Instant::now();
                                         
                                         /* Send a response back directly with a binary channel that will be used to push data that 
                                            gets read from the sd2snes */                                           
@@ -325,9 +345,11 @@ impl SD2Snes {
                                         let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&addr_info)).await;
 
                                         /* Read data to the end */
-                                        let result = sd2snes.read_stream(tx, padded_size, data_size).await;
+                                        let _ = sd2snes.read_stream(tx, padded_size, data_size).await;
                                         
-                                        println!("GetAddress Complete: Sent {:?}({:?}) - Received: {:?}", padded_size, data_size, result);                                        
+                                        let elapsed = start.elapsed();
+                                        let kbps = ((data_size as f64) / 1024f64) / elapsed.as_secs_f64();
+                                        println!("GetAddress Complete: Sent {:?}({:?} padded) bytes in {:?}ms ({:?}kB/s)", data_size, padded_size, elapsed.as_millis(), kbps);
 
                                     },
                                     protocol::Command::PutAddress(addr_info) => {
@@ -456,7 +478,7 @@ impl SD2SnesManager {
                     Some(message) = device_manager_rx.recv() => {
                         match message {
                             DeviceManagerCommand::Close => {
-                                for (_, device) in &devices {
+                                for device in devices.values() {
                                     device.sender.send(DeviceRequest::Close).await.unwrap();
                                     sender.send(ManagerInfo::DeviceRemoved(device.id)).await.unwrap();
                                 }
@@ -476,14 +498,13 @@ impl SD2SnesManager {
         tokio::spawn(async move {
             let mut current_ports: Vec<SerialPortInfo> = Vec::new();
             loop {
-                /* Check every 100ms for changed ports */
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                /* Check every 500ms for changed ports */
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                 /* Get all serial ports and check if any port matches the USB2SNES vid/pid */
-                let available_ports: Vec<SerialPortInfo> = tokio_serial::available_ports().unwrap().drain(..).filter(|p| match &p.port_type {
-                    SerialPortType::UsbPort(usb_info) if usb_info.vid == 4617 && usb_info.pid == 23074 => true,
-                    _ => false
-                }).collect();
+                let available_ports: Vec<SerialPortInfo> = tokio_serial::available_ports().unwrap().drain(..)
+                    .filter(|p| matches!(&p.port_type, SerialPortType::UsbPort(usb_info) if usb_info.vid == 4617 && usb_info.pid == 23074))
+                    .collect();
 
                 let removed_ports = current_ports.iter().filter(|p| !available_ports.contains(p));
                 let added_ports = available_ports.iter().filter(|p| !current_ports.contains(p));
