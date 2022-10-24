@@ -5,15 +5,41 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "(Windows) Launch",
-            "type": "cppvsdbg",
+            "type": "lldb",
             "request": "launch",
-            "program": "${workspaceRoot}/target/debug/ruccs.exe",
+            "name": "Debug executable 'ruccs'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=ruccs",
+                    "--package=ruccs"
+                ],
+                "filter": {
+                    "name": "ruccs",
+                    "kind": "bin"
+                }
+            },
             "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceRoot}/target/debug/",
-            "environment": [],
-            "externalConsole": true
+            "cwd": "${workspaceFolder}"
         },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'ruccs'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=ruccs",
+                    "--package=ruccs"
+                ],
+                "filter": {
+                    "name": "ruccs",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
     ]
 }

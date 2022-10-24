@@ -210,7 +210,7 @@ impl Request {
 
         let req = Request {
             command,
-            space: Space::from_str(&wr.space.as_ref().unwrap_or(&"SNES".into()))?,
+            space: Space::from_str(wr.space.as_ref().unwrap_or(&"SNES".into()))?,
             flags: match &wr.flags {
                 Some(fl) => fl.iter().map(|f| Flags::from_str(f).unwrap_or(Flags::NONE)).reduce(|a, b| a | b),                
                 None => None

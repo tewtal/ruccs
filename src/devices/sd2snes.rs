@@ -106,30 +106,19 @@ impl SD2Snes {
     /* amount of data is always read from the sd2snes */
     pub async fn read_stream(&mut self, tx: Sender<Vec<u8>>, padded_size: usize, data_size: usize) -> usize {
         let mut read_len = 0;
-        let mut buf = vec![0u8; 4096];
-
-        let n = Instant::now();
-        while read_len < padded_size {            
-            //let bytes = self.stream.read(&mut buf).await.unwrap();
-            let i = Instant::now();
-            let bytes = self.stream.try_read(&mut buf);
-            match bytes {
-                Ok(bytes) => {
-                    println!("try_read took: {:?} us, (total: {:?} us) {:?} bytes", i.elapsed().as_micros(), n.elapsed().as_micros(), bytes);
-                    if bytes > 0 {
-                        if (read_len + bytes) > data_size {
-                            let _ = tx.send(buf[..(bytes - ((read_len + bytes) - data_size))].to_vec()).await;
-                        } else {
-                            let _ = tx.send(buf[..bytes].to_vec()).await;
-                        }
-                        read_len += bytes;
-                    }
-                },
-                Err(e) => {
-                    match e.kind() {
-                        std::io::ErrorKind::WouldBlock => (),
-                        _ => break
-                    }
+                
+        while read_len < padded_size {
+            let read_size = if (padded_size - read_len) < 4096 { padded_size - read_len } else { 4096 };
+            let mut buf = vec![0u8; read_size];
+            let bytes = self.stream.read(&mut buf).await.unwrap();
+            println!("Read Size: {:?}, Read Len: {:?}, Bytes: {:?}, Data Size: {:?}", read_size, read_len, bytes, data_size);
+            if bytes > 0 {
+                if read_len > data_size {
+                    /* We've already sent the relevant data to the target, do nothing and read more from the device */
+                } else if (read_len + bytes) > data_size {
+                    let _ = tx.send(buf[..(bytes - ((read_len + bytes) - data_size))].to_vec()).await;
+                } else {
+                    let _ = tx.send(buf[..bytes].to_vec()).await;
                 }
             }
         }
@@ -502,9 +491,20 @@ impl SD2SnesManager {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                 /* Get all serial ports and check if any port matches the USB2SNES vid/pid */
-                let available_ports: Vec<SerialPortInfo> = tokio_serial::available_ports().unwrap().drain(..)
-                    .filter(|p| matches!(&p.port_type, SerialPortType::UsbPort(usb_info) if usb_info.vid == 4617 && usb_info.pid == 23074))
-                    .collect();
+                let available_ports: Vec<SerialPortInfo> = tokio_serial::available_ports().unwrap().drain(..).filter(|p| match &p.port_type {
+                    SerialPortType::UsbPort(usb_info) if usb_info.vid == 4617 && usb_info.pid == 23074 => {
+                        if cfg!(target_os = "macos") {
+                            /* 
+                                MacOS is a bit dumb and will generate two serial devices for each USB-serial (one cu.XXX and one tty.XXX).
+                                This makes sure we only get one of the devices.                            
+                            */
+                            if p.port_name.starts_with("/dev/cu.") { true } else { false }
+                        } else {
+                            true
+                        }
+                    },
+                    _ => false
+                }).collect();
 
                 let removed_ports = current_ports.iter().filter(|p| !available_ports.contains(p));
                 let added_ports = available_ports.iter().filter(|p| !current_ports.contains(p));
