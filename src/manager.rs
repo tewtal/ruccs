@@ -1,4 +1,4 @@
-use crate::devices::{device::{Device}, lua::{LuaManager}, retroarch::RetroarchManager, sd2snes::SD2SnesManager};
+use crate::devices::{device::{Device}, lua::{LuaManager}, retroarch::RetroarchManager, sd2snes::SD2SnesManager, emunwa::EmuNwaManager};
 use uuid::Uuid;
 use tokio::sync::{RwLock};
 use std::sync::Arc;
@@ -42,7 +42,7 @@ impl Manager {
             let information = device.request(req).await?;    
             Ok(information)
         } else {
-            return Err("The requested device does not exist".into())
+            Err("The requested device does not exist".into())
         }
     }
 }
@@ -58,7 +58,11 @@ pub async fn run_manager(manager: Arc<RwLock<Manager>>) {
     /* Start the SD2SnesManager task */
     let _snes_sender = SD2SnesManager::start(manager_tx.clone()).await;
 
+    /* Start the RetroarchManager task */
     let _ra_sender = RetroarchManager::start(manager_tx.clone()).await;
+
+    /* Start the EmuNWAManager task */
+    let _emunwa_sender = EmuNwaManager::start(manager_tx.clone()).await;
 
     tokio::spawn(async move {
         loop {

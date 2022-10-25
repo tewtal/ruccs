@@ -330,9 +330,9 @@ impl SD2Snes {
                                         /* Set flags depending on opcode and so on, NORESP is set to not have to care about a response since it's redundant */
                                         let flags = req.flags.unwrap_or(Flags::NONE) | Flags::NORESP | if opcode == Opcode::VGET { Flags::DATA64B } else { Flags::NONE };
                                         
-                                        /* 
-                                            Send command and read data, only once if there's a valid VGET command, otherwise we loop single GET requests
-                                            until all address+size pairs have been handled */
+                                        /*  Send command and read data, only once if there's a valid VGET command, otherwise we loop single GET requests */
+                                        /*  until all address+size pairs have been handled */
+                                        
                                         if opcode == Opcode::VGET {                                            
                                             let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&addr_info)).await;
                                             let _ = sd2snes.read_stream(tx, padded_size, data_size).await;
@@ -369,8 +369,8 @@ impl SD2Snes {
                                         /* Set flags depending on opcode and so on, NORESP is set to not have to care about a response since it's redundant */
                                         let flags = req.flags.unwrap_or(Flags::NONE) | Flags::NORESP | if opcode == Opcode::VPUT { Flags::DATA64B } else { Flags::NONE };
 
-                                        /*  Send command and read data, only once if there's a valid VPUT command, otherwise we loop single PUT requests
-                                            until all address+size pairs have been handled */
+                                        /*  Send command and read data, only once if there's a valid VPUT command, otherwise we loop single PUT requests */
+                                        /*  until all address+size pairs have been handled */
 
                                         let result = if opcode == Opcode::VPUT {                                            
                                             let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&addr_info)).await;
@@ -399,7 +399,7 @@ impl SD2Snes {
                                         let response = DeviceResponse::FileReader((data_size, rx));
 
                                         /* Don't fail if sender is broken, we now have to read the file from the sd2snes even though the receiver is disconnected */
-                                        let _ = sender.send(response).unwrap();
+                                        let _ = sender.send(response);
 
                                         /* Read data to the end */
                                         let result = sd2snes.read_stream(tx, padded_size, data_size).await;                                        
@@ -519,7 +519,7 @@ impl SD2SnesManager {
                                 MacOS is a bit dumb and will generate two serial devices for each USB-serial (one cu.XXX and one tty.XXX).
                                 This makes sure we only get one of the devices.                            
                             */
-                            if p.port_name.starts_with("/dev/cu.") { true } else { false }
+                            p.port_name.starts_with("/dev/cu.")
                         } else {
                             true
                         }
