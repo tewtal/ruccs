@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::devices::device::{DeviceRequest, DeviceResponse, Device, DeviceInfo, DeviceManagerCommand};
 use crate::manager::ManagerInfo;
-use crate::protocol::{Command, MemoryDomain, self};
+use crate::protocol::{Command, MemoryDomain, self, AddressInfo};
 
 
 #[allow(dead_code)]
@@ -142,7 +142,7 @@ impl EmuNwa {
         Ok(write_len)
     }
 
-    async fn get_info(&mut self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn handle_info_request(&mut self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         
         let emulator_info = match EmuNwa::send_command(&mut self.stream, "EMULATOR_INFO", None, true).await {
             Ok(CommandResponse::Ascii(r)) => {
@@ -176,6 +176,42 @@ impl EmuNwa {
         ])
     }
 
+    async fn handle_write_request(&mut self, rx: &mut Receiver<Vec<u8>>, ai: &AddressInfo) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let domain = EmuNwa::domain_to_str(&ai.domain).to_string();
+        let address = ai.address.to_string();
+        let size = ai.size.to_string();
+        let args = vec![domain.as_str(), address.as_str(), size.as_str()];
+        
+        let _ = EmuNwa::send_command(&mut self.stream, "bCORE_WRITE", Some(&args), false).await?;
+        let written_bytes = self.write_stream(rx, ai.size as usize).await?;
+        let _ = EmuNwa::read_response(&mut self.stream).await?;
+
+        Ok(written_bytes)
+    }
+
+    async fn handle_read_requests(&mut self, tx: Sender<Vec<u8>>, requests: &Vec<(MemoryDomain, Vec<String>)>) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let mut read_size = 0;
+
+        /* Send all requests without reading responses */
+        for req in requests {
+            let _ = EmuNwa::send_command(&mut self.stream, "CORE_READ", Some(&req.1.iter().map(|s| &**s).collect::<Vec<_>>()), false).await?;
+        }
+
+        /* Read the combined responses */
+        for _ in requests {
+            let ltx = tx.clone();
+            let response = EmuNwa::read_response(&mut self.stream).await?;
+            
+            match response {
+                CommandResponse::Binary(s) if s == 0 => { return Err("Invalid Read Size".into()) },
+                CommandResponse::Binary(s) => read_size += self.read_stream(ltx, s as usize).await?,
+                _ => return Err("Invalid response".into())
+            }
+        }
+
+        Ok(read_size)
+    }
+
     async fn start(id: Uuid, port: u16, stream: TcpStream, name: &str, emunwa_manager_tx: Sender<(Uuid, u16, DeviceInfo)>) -> Device {
         stream.set_nodelay(true).unwrap();
         let mut emunwa = EmuNwa::new(id, stream, name);
@@ -197,7 +233,7 @@ impl EmuNwa {
                             DeviceRequest::Request { req, resp: sender } => {
                                 match req.command {
                                     Command::Info => {
-                                        let info_strings = emunwa.get_info().await;
+                                        let info_strings = emunwa.handle_info_request().await;
                                         if let Ok(info) = info_strings {
                                             let _ = sender.send(DeviceResponse::Strings(info));
                                         } else {
@@ -230,38 +266,10 @@ impl EmuNwa {
                                         }
                                         requests.push(request);
 
-                                        /* Send all requests without reading responses */
-                                        for req in &requests {
-                                            let response = EmuNwa::send_command(&mut emunwa.stream, "CORE_READ", Some(&req.1.iter().map(|s| &**s).collect::<Vec<_>>()), false).await;
-                                            if response.is_err() {
-                                                let _ = emunwa.stream.shutdown().await;
-                                                let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed("Unexpected response".into()))).await;
-                                                return;                                              
-                                            }
-                                        }
-
-                                        /* Read the combined responses */
-                                        for _ in &requests {
-                                            let ltx = tx.clone();
-                                            let response = EmuNwa::read_response(&mut emunwa.stream).await;
-                                            if let Ok(CommandResponse::Binary(cmd_size)) = response {
-                                                if cmd_size == 0 {
-                                                    let _ = emunwa.stream.shutdown().await;
-                                                    let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed("Read null response".into()))).await;
-                                                    return;                                                    
-                                                }
-
-                                                let response = emunwa.read_stream(ltx, cmd_size as usize).await;
-                                                if response.is_err() {
-                                                    let _ = emunwa.stream.shutdown().await;
-                                                    let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed("Unexpected response".into()))).await;
-                                                    return;                                              
-                                                }                                                
-                                            } else {
-                                                let _ = emunwa.stream.shutdown().await;
-                                                let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed("Unexpected response".into()))).await;
-                                                return;
-                                            }
+                                        if let Err(e) = emunwa.handle_read_requests(tx.clone(), &requests).await {
+                                            let _ = emunwa.stream.shutdown().await;
+                                            let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed(e.to_string()))).await;
+                                            return;  
                                         }
 
                                         tx.closed().await;
@@ -274,30 +282,11 @@ impl EmuNwa {
                                         let response = DeviceResponse::BinaryWriter((data_size, tx));
                                         sender.send(response).unwrap();
 
-                                        for ai in addr_info {
-                                            let domain = EmuNwa::domain_to_str(&ai.domain).to_string();
-                                            let address = format!("{}", ai.address);
-                                            let size = format!("{}", ai.size);
-                                            let args = &[domain.as_str(), address.as_str(), size.as_str()];
-                                            let result = EmuNwa::send_command(&mut emunwa.stream, "bCORE_WRITE", Some(args), false).await;
-                                            if result.is_ok() {
-                                                let response = emunwa.write_stream(&mut rx, ai.size as usize).await;
-                                                if response.is_ok() {
-                                                    let response = EmuNwa::read_response(&mut emunwa.stream).await;
-                                                    if response.is_err() {
-                                                        let _ = emunwa.stream.shutdown().await;
-                                                        let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed("Unexpected response".into()))).await;
-                                                        return;  
-                                                    }
-                                                } else {
-                                                    let _ = emunwa.stream.shutdown().await;
-                                                    let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed("Unexpected response".into()))).await;
-                                                    return;                                                      
-                                                }
-                                            } else {
+                                        for ai in &addr_info {
+                                            if let Err(e) = emunwa.handle_write_request(&mut rx, ai).await {
                                                 let _ = emunwa.stream.shutdown().await;
-                                                let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed("Unexpected response".into()))).await;
-                                                return;                                                
+                                                let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed(e.to_string()))).await;
+                                                return;  
                                             }
                                         }
                                     },

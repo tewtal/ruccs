@@ -161,20 +161,13 @@ impl SD2Snes {
         match (space, opcode, args) {
             (Space::SNES | Space::CMD | Space::MSU, Opcode::GET | Opcode::PUT, CommandArg::AddressList(addr_list)) => {
                 let (addr, size) = (addr_list[0].orig_address, addr_list[0].size);
-                buf[252] = ((size >> 24) & 0xFF) as u8;
-                buf[253] = ((size >> 16) & 0xFF) as u8;
-                buf[254] = ((size >> 8) & 0xFF) as u8;
-                buf[255] = (size & 0xFF) as u8;
-
+                buf.splice(252..=255, (size as u32).to_le_bytes());
                 buf = self.pad_or_truncate(&buf);
-                buf[256] = ((addr >> 24) & 0xFF) as u8;
-                buf[257] = ((addr >> 16) & 0xFF) as u8;
-                buf[258] = ((addr >> 8) & 0xFF) as u8;
-                buf[259] = (addr & 0xFF) as u8;
+                buf.splice(256..=259, (addr as u32).to_le_bytes());
             },
             (Space::SNES | Space::CMD | Space::MSU, Opcode::VGET | Opcode::VPUT, CommandArg::AddressList(addr_list)) => {
                 buf = buf[..64].to_vec();
-                for (i, ai) in addr_list.iter().enumerate() {
+                for (i, ai) in addr_list.iter().enumerate() {                    
                     buf[32 + (i*4)] = (ai.size & 0xFF) as u8;
                     buf[33 + (i*4)] = ((ai.orig_address >> 16) & 0xFF) as u8;
                     buf[34 + (i*4)] = ((ai.orig_address >> 8) & 0xFF) as u8;
@@ -191,11 +184,8 @@ impl SD2Snes {
                 buf = self.pad_or_truncate(&buf);
             },
             (Space::FILE, Opcode::PUT, CommandArg::FilenameAndSize((path, size))) => {
-                buf.extend(path.as_bytes());                
-                buf[252] = ((size >> 24) & 0xFF) as u8;
-                buf[253] = ((size >> 16) & 0xFF) as u8;
-                buf[254] = ((size >> 8) & 0xFF) as u8;
-                buf[255] = (size & 0xFF) as u8;
+                buf.extend(path.as_bytes());
+                buf.splice(252..=255, (size as u32).to_le_bytes());
                 buf = self.pad_or_truncate(&buf);
             },
             _ => { buf = self.pad_or_truncate(&buf); }
@@ -514,15 +504,7 @@ impl SD2SnesManager {
                 /* Get all serial ports and check if any port matches the USB2SNES vid/pid */
                 let available_ports: Vec<SerialPortInfo> = tokio_serial::available_ports().unwrap().drain(..).filter(|p| match &p.port_type {
                     SerialPortType::UsbPort(usb_info) if usb_info.vid == 4617 && usb_info.pid == 23074 => {
-                        if cfg!(target_os = "macos") {
-                            /* 
-                                MacOS is a bit dumb and will generate two serial devices for each USB-serial (one cu.XXX and one tty.XXX).
-                                This makes sure we only get one of the devices.                            
-                            */
-                            p.port_name.starts_with("/dev/cu.")
-                        } else {
-                            true
-                        }
+                        if cfg!(target_os = "macos") { p.port_name.starts_with("/dev/cu.") } else { true }
                     },
                     _ => false
                 }).collect();
