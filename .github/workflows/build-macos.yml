@@ -22,7 +22,7 @@ jobs:
         wget -q https://download.qt.io/archive/qt/5.15/5.15.2/single/qt-everywhere-src-5.15.2.tar.xz
         tar -xf qt-everywhere-src-5.15.2.tar.xz
         cd qt-everywhere-src-5.15.2
-        ./configure -opensource -nomake examples -nomake tests -platform macx-clang QMAKE_APPLE_DEVICE_ARCHS=arm64 -prefix /usr/local/QT-5.15.2-arm
+        ./configure -opensource -nomake examples -nomake tests -platform macx-clang QMAKE_APPLE_DEVICE_ARCHS="x86_64 arm64" -prefix /usr/local/QT-5.15.2-arm
         make
         make install        
 
