@@ -13,25 +13,25 @@ jobs:
     runs-on: macos-12
 
     steps:
-    - uses: actions/checkout@v3
-    
-    - name: Install Qt (X86_64)
-      uses: jurplel/install-qt-action@v3
-      with:
-        version: 5.15.2
+    - uses: actions/checkout@v3    
 
     - name: Build QT (AARCH64)
       run: |
-        git clone https://code.qt.io/qt/qt5.git
-        cd qt5
-        git checkout 5.12
-        perl init-repository
+        mkdir qt-aarch64
+        cd qt-aarch64
+        wget https://download.qt.io/archive/qt/5.15/5.15.2/single/qt-everywhere-src-5.15.2.tar.xz
+        tar -xf qt-everywhere-src-5.15.2.tar.xz
+        cd qt-everywhere-src-5.15.2
         mkdir qt5-build
         cd qt5-build
         ../qt5/configure -opensource -nomake examples -nomake tests -platform macx-clang QMAKE_APPLE_DEVICE_ARCHS=arm64 -prefix /usr/local/QT-5.15.2-arm
         make
-        make install
+        make install        
 
+    - name: Install Qt (X86_64)
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: 5.15.2
     
     - name: Add target
       run: rustup add target aarch64-apple-darwin
