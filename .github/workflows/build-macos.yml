@@ -1,0 +1,45 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: macos-12
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Qt (X86_64)
+      uses: jurpl1/install-qt-action@v3
+      with:
+        version: 5.15.2
+
+    - name: Build QT (AARCH64)
+      run: |
+        git clone https://code.qt.io/qt/qt5.git
+        cd qt5
+        git checkout 5.12
+        perl init-repository
+        mkdir qt5-build
+        cd qt5-build
+        ../qt5/configure -opensource -nomake examples -nomake tests -platform macx-clang QMAKE_APPLE_DEVICE_ARCHS=arm64 -prefix /usr/local/QT-5.15.2-arm
+        make
+        make install
+
+    
+    - name: Add target
+      run: rustup add target aarch64-apple-darwin
+    
+    - name: Build X86_64
+      run: cargo build --verbose
+    
+    - name: Build AARCH64
+      run: cargo build --verbose --target aarch64-apple-darwin
+      
+    
