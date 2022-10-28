@@ -22,6 +22,7 @@ pub enum EmuInfo {
     EmuRemoved { name: String, port: u16 }
 }
 
+#[derive(Debug)]
 pub enum CommandResponse {
     Ascii(Vec<HashMap<String, String>>),
     Binary(usize),
@@ -93,7 +94,7 @@ impl EmuNwa {
         let mut list = Vec::new();
         let mut lines = HashMap::new();
 
-        for line in response.split('\n').filter(|l| !l.trim().is_empty()).map(|l| l.split(':').collect::<Vec<_>>()) {
+        for line in response.split('\n').filter(|l| !l.trim().is_empty()).map(|l| l.splitn(2, ':',).collect::<Vec<_>>()) {
             if line.len() != 2 {
                 return Err("Invalid response - Line does not have a key and a value".into());
             }
@@ -149,7 +150,7 @@ impl EmuNwa {
                 let h = r.first().ok_or("Empty response list")?;
                 Ok(h.clone())
             }
-            _ => Err("Unexpected response")
+            _ => Err("Unexpected info response")
         }?;
 
         let _emulation_status = match EmuNwa::send_command(&mut self.stream, "EMULATION_STATUS", None, true).await {
@@ -157,7 +158,7 @@ impl EmuNwa {
                 let h = r.first().ok_or("Empty response list")?;
                 Ok(h.clone())
             },
-            _ => Err("Unexpected response")
+            _ => Err("Unexpected status response")
         }?;        
 
         let game_info = match EmuNwa::send_command(&mut self.stream, "GAME_INFO", None, true).await {
@@ -165,7 +166,7 @@ impl EmuNwa {
                 let h = r.first().ok_or("Empty response list")?;
                 Ok(h.clone())
             },
-            _ => Err("Unexpected response")
+            _ => Err("Unexpected game info response")
         }?;
 
         Ok(vec![

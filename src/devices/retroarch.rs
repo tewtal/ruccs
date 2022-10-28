@@ -1,4 +1,3 @@
-use qt_core::q_meta_object::Connection;
 use tokio::net::{UdpSocket};
 use tokio::time::error::Elapsed;
 use tokio::time::{Duration, timeout};
