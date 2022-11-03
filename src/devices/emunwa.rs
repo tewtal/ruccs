@@ -290,6 +290,24 @@ impl EmuNwa {
                                             }
                                         }
                                     },
+                                    Command::Boot(path) => {
+                                        if let Err(e) = EmuNwa::send_command(&mut emunwa.stream, "LOAD_GAME", Some(&[&path]), true).await {
+                                            let _ = emunwa.stream.shutdown().await;
+                                            let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed(e.to_string()))).await;
+                                            return;                                             
+                                        }
+
+                                        let _ = sender.send(DeviceResponse::Empty);
+                                    },
+                                    Command::Reset => {
+                                        if let Err(e) = EmuNwa::send_command(&mut emunwa.stream, "EMULATION_RESET", None, true).await {
+                                            let _ = emunwa.stream.shutdown().await;
+                                            let _ = emunwa_manager_tx.send((id, port, DeviceInfo::ConnectionClosed(e.to_string()))).await;
+                                            return;                                             
+                                        }
+
+                                        let _ = sender.send(DeviceResponse::Empty);
+                                    }
                                     _ => sender.send(DeviceResponse::Empty).unwrap()
                                 }
                             },
