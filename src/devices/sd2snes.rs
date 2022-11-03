@@ -1,22 +1,20 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
-use tokio_serial::{self, SerialPortInfo, SerialStream, SerialPort, SerialPortType};
 use tokio::sync::mpsc::{Sender, channel};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use uuid::Uuid;
 
 use crate::devices::device::{DeviceRequest, DeviceResponse, Device, DeviceInfo, DeviceManagerCommand};
 use crate::manager::ManagerInfo;
 use crate::protocol::{self, AddressInfo, Flags, Opcode, Space};
 
-
+use serialport::{SerialPort, SerialPortInfo, SerialPortType, ClearBuffer};
 
 #[allow(dead_code)]
 pub struct SD2Snes {
     id: Uuid,
     port_name: String,
-    stream: SerialStream,
+    port: Box<dyn SerialPort>,
     name: String,
     block_size: usize
 }
@@ -31,12 +29,12 @@ pub enum CommandArg<'a> {
 
 impl SD2Snes {
 
-    pub fn new(id: Uuid, port_name: &str, stream: SerialStream) -> Self
+    pub fn new(id: Uuid, port_name: &str, port: Box<dyn SerialPort>) -> Self
     {
         Self {
             id,
             port_name: port_name.to_string(),
-            stream,
+            port,
             name: format!("SD2SNES {}", port_name),
             block_size: 512
         }
@@ -67,35 +65,47 @@ impl SD2Snes {
      */
     pub fn clear_read_buffer(&mut self) {
         let mut tmp = vec![0u8; 512];
-        let mut clear = false;
-        while !clear {
-            clear = self.stream.try_read(&mut tmp).is_err();
+        loop {
+            if self.port.bytes_to_read().unwrap_or(0) > 0 {
+                self.port.read(&mut tmp).unwrap();
+            } else {
+                break;
+            }
         }
     }
 
     /* Writes data to the sd2snes in <block_size> chunks */
     pub async fn write_data(&mut self, data: &[u8], block_size: usize) {
-        for chunk in data.chunks(block_size) {
-            self.stream.write_all(chunk).await.unwrap();
-        }
+        let mut port = self.port.try_clone().unwrap();
+        let data = data.to_vec();
+        let _ = tokio::task::spawn_blocking(move || {
+            for chunk in data.chunks(block_size) {
+                let _ = port.write_all(&chunk);
+            }
+        }).await;
 
-        let _ = self.stream.flush().await;
+        let _ = self.port.flush();
     }
 
     /* Reads <len> bytes of data from the sd2snes */
     pub async fn read_data(&mut self, len: usize) -> Vec<u8> {
-        let mut read_len = 0;        
-        let mut data = Vec::new();
-        
-        while read_len < len {
-            let read_size = if (len - read_len) < 4096 { len - read_len } else { 4096 };
-            let mut buf = vec![0u8; read_size];
-            let bytes = self.stream.read(&mut buf).await.unwrap();
-            if bytes > 0 {
-                read_len += bytes;
-                data.extend(buf);        
+        let mut port = self.port.try_clone().unwrap();
+        let data = tokio::task::spawn_blocking(move || {
+            let mut read_len = 0;        
+            let mut data = Vec::new();
+            
+            while read_len < len {
+                let read_size = if (len - read_len) < 4096 { len - read_len } else { 4096 };
+                let mut buf = vec![0u8; read_size];
+                let bytes = port.read(&mut buf).unwrap();
+                if bytes > 0 {
+                    read_len += bytes;
+                    data.extend(buf[..bytes].to_vec());
+                }
             }
-        }
+            
+            data
+        }).await.unwrap();
 
         data
     }
@@ -104,23 +114,30 @@ impl SD2Snes {
     /* This ignores any errors caused by the remote channel not being available, so that the correct */
     /* amount of data is always read from the sd2snes */
     pub async fn read_stream(&mut self, tx: Sender<Vec<u8>>, padded_size: usize, data_size: usize) -> usize {
+        let mut port = self.port.try_clone().unwrap();                    
         let mut read_len = 0;
-                
-        while read_len < padded_size {
-            let read_size = if (padded_size - read_len) < 4096 { padded_size - read_len } else { 4096 };
-            let mut buf = vec![0u8; read_size];
-            let bytes = self.stream.read(&mut buf).await.unwrap();
-            if bytes > 0 {
-                if read_len > data_size {
-                    /* We've already sent the relevant data to the target, do nothing and read more from the device */
-                } else if (read_len + bytes) > data_size {
-                    let _ = tx.send(buf[..(bytes - ((read_len + bytes) - data_size))].to_vec()).await;
-                } else {
-                    let _ = tx.send(buf[..bytes].to_vec()).await;
+
+        let blocking_tx = tx.clone();
+        let read_len = tokio::task::spawn_blocking(move ||{
+            while read_len < padded_size {
+                let read_size = if (padded_size - read_len) < 4096 { padded_size - read_len } else { 4096 };
+                let mut buf = vec![0u8; read_size];                
+                let bytes = port.read(&mut buf).unwrap();
+
+                if bytes > 0 {
+                    if read_len > data_size {
+                        /* We've already sent the relevant data to the target, do nothing and read more from the device */
+                    } else if (read_len + bytes) > data_size {
+                        let _ = blocking_tx.blocking_send(buf[..(bytes - ((read_len + bytes) - data_size))].to_vec());
+                    } else {
+                        let _ = blocking_tx.blocking_send(buf[..bytes].to_vec());
+                    }
+                    read_len += bytes;
                 }
-                read_len += bytes;
             }
-        }
+
+            read_len
+        }).await.unwrap();
 
         /* Wait for receiver to finish reading fully before resuming and potentially dropping the sender */
         tx.closed().await;
@@ -144,11 +161,15 @@ impl SD2Snes {
         }
 
         /* Write padding if needed */
-        if write_len < padded_size {
-            let padding = vec![0u8; padded_size - write_len];
-            self.stream.write_all(&padding).await.unwrap();
-            write_len += padding.len();
-        }
+        let mut port = self.port.try_clone().unwrap();
+        write_len = tokio::task::spawn_blocking(move || {
+            if write_len < padded_size {
+                let padding = vec![0u8; padded_size - write_len];
+                port.write_all(&padding).unwrap();
+                write_len += padding.len();
+            }
+            write_len
+        }).await.unwrap();
 
         write_len
     }
@@ -160,9 +181,16 @@ impl SD2Snes {
         match (space, opcode, args) {
             (Space::SNES | Space::CMD | Space::MSU, Opcode::GET | Opcode::PUT, CommandArg::AddressList(addr_list)) => {
                 let (addr, size) = (addr_list[0].orig_address, addr_list[0].size);
-                buf.splice(252..=255, (size as u32).to_le_bytes());
+                buf[252] = ((size >> 24) & 0xFF) as u8;
+                buf[253] = ((size >> 16) & 0xFF) as u8;
+                buf[254] = ((size >> 8) & 0xFF) as u8;
+                buf[255] = (size & 0xFF) as u8;
+
                 buf = self.pad_or_truncate(&buf);
-                buf.splice(256..=259, (addr as u32).to_le_bytes());
+                buf[256] = ((addr >> 24) & 0xFF) as u8;
+                buf[257] = ((addr >> 16) & 0xFF) as u8;
+                buf[258] = ((addr >> 8) & 0xFF) as u8;
+                buf[259] = (addr & 0xFF) as u8;
             },
             (Space::SNES | Space::CMD | Space::MSU, Opcode::VGET | Opcode::VPUT, CommandArg::AddressList(addr_list)) => {
                 buf = buf[..64].to_vec();
@@ -183,8 +211,11 @@ impl SD2Snes {
                 buf = self.pad_or_truncate(&buf);
             },
             (Space::FILE, Opcode::PUT, CommandArg::FilenameAndSize((path, size))) => {
-                buf.extend(path.as_bytes());
-                buf.splice(252..=255, (size as u32).to_le_bytes());
+                buf.extend(path.as_bytes());                
+                buf[252] = ((size >> 24) & 0xFF) as u8;
+                buf[253] = ((size >> 16) & 0xFF) as u8;
+                buf[254] = ((size >> 8) & 0xFF) as u8;
+                buf[255] = (size & 0xFF) as u8;
                 buf = self.pad_or_truncate(&buf);
             },
             _ => { buf = self.pad_or_truncate(&buf); }
@@ -195,7 +226,7 @@ impl SD2Snes {
         
         /* Send command to sd2snes */
         self.write_data(&buf, buf.len()).await;
-
+        
         if flags.contains(Flags::NORESP) {
             None
         } else {
@@ -228,12 +259,12 @@ impl SD2Snes {
     }
 
     async fn start(id: Uuid, port_name: &str, _snes_manager_tx: Sender<(String, DeviceInfo)>) -> Device {
-        let mut stream = tokio_serial::SerialStream::open(&tokio_serial::new(port_name, 921600)).unwrap();
-        stream.write_data_terminal_ready(true).unwrap();
-        stream.set_flow_control(tokio_serial::FlowControl::None).unwrap();
-                
+        let mut port = serialport::new(port_name, 921600).open().unwrap();
+        port.write_data_terminal_ready(true).unwrap();
+        port.set_flow_control(serialport::FlowControl::None).unwrap();
+        //port.set_timeout(Duration::from_millis(1000)).unwrap();
 
-        let mut sd2snes = SD2Snes::new(id, port_name, stream);
+        let mut sd2snes = SD2Snes::new(id, port_name, port);
 
         /* The main communication channel for this specific device, all clients will have to go through this to use the device */
         /* The channel buffer is set to 1 since that's the maximum limit of commands the device can handle at a time. */
@@ -331,6 +362,7 @@ impl SD2Snes {
                                                 let ltx = tx.clone();
                                                 let cur_data_size = ai.size as usize;
                                                 let cur_padded_size = sd2snes.pad_size(ai.size as usize, 512);
+                                                println!("Sending command: {} {} {:?}", cur_data_size, cur_padded_size, ai);
                                                 let _ = sd2snes.send_command(opcode, req.space, flags, CommandArg::AddressList(&vec![ai.clone()])).await;
                                                 let _ = sd2snes.read_stream(ltx, cur_padded_size, cur_data_size).await;
                                             }
@@ -416,7 +448,7 @@ impl SD2Snes {
                                 }                                
                             },
                             DeviceRequest::Close => {
-                                let _ = sd2snes.stream.shutdown().await;
+                                //let _ = sd2snes.port.
                                 break
                             },
                         }    
@@ -502,7 +534,7 @@ impl SD2SnesManager {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                 /* Get all serial ports and check if any port matches the USB2SNES vid/pid */
-                let available_ports: Vec<SerialPortInfo> = tokio_serial::available_ports().unwrap().drain(..).filter(|p| match &p.port_type {
+                let available_ports: Vec<SerialPortInfo> = serialport::available_ports().unwrap().drain(..).filter(|p| match &p.port_type {
                     SerialPortType::UsbPort(usb_info) if usb_info.vid == 4617 && usb_info.pid == 23074 => {
                         if cfg!(target_os = "macos") { p.port_name.starts_with("/dev/cu.") } else { true }
                     },

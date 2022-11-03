@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+//#![allow(dead_code)]
 
 #[cfg(target_os = "linux")]
 use tao::platform::linux::SystemTrayBuilderExtLinux;
@@ -77,15 +77,15 @@ fn build_menu(runtime: &tokio::runtime::Runtime, manager: &Arc<RwLock<Manager>>)
 pub fn run(runtime: tokio::runtime::Runtime, manager: Arc<RwLock<Manager>>) {
   
     let event_loop = EventLoop::new();
-
-    let tray_menu = ContextMenu::new();
+    let tray_menu = build_menu(&runtime, &manager);
+    let tray_manager = manager.clone();
     let tray_id = "main-tray";
     let mut system_tray = Some(create_system_tray(tray_id, &event_loop, tray_menu));
-  
-    event_loop.run(move |event, _event_loop, control_flow| {
 
+    event_loop.run(move |event, _, control_flow| {
+      
       *control_flow = ControlFlow::Wait;
-  
+
       match event {
         Event::MenuEvent {
           menu_id,
@@ -94,10 +94,12 @@ pub fn run(runtime: tokio::runtime::Runtime, manager: Arc<RwLock<Manager>>) {
         } => {
           if menu_id.0 == QUIT_ID {
             // drop the system tray before exiting to remove the icon from system tray on Windows
+            
             system_tray.take();
             *control_flow = ControlFlow::Exit;
+            std::process::exit(0);
           }
-        }
+        },
         Event::TrayEvent {
           id: _,
           bounds: _,
@@ -107,10 +109,10 @@ pub fn run(runtime: tokio::runtime::Runtime, manager: Arc<RwLock<Manager>>) {
         } => {
           if event == TrayEvent::RightClick {
             /* Every time the menu is opened with a right click we rebuild it */
-            system_tray.as_mut().unwrap().set_menu(&build_menu(&runtime, &manager));
+            system_tray.as_mut().unwrap().set_menu(&build_menu(&runtime, &tray_manager));
           }
-        }
-        _ => (),
+        },
+        _ => ()
     }
   });
 }

@@ -1,5 +1,5 @@
 // If the OS is Windows, it's a release build and the gui is enabled, make the app run without a console window
-#![cfg_attr(target_os = "windows", cfg_attr(not(debug_assertions), cfg_attr(feature = "gui", windows_subsystem = "windows")))]
+//#![cfg_attr(target_os = "windows", cfg_attr(not(debug_assertions), cfg_attr(feature = "gui", windows_subsystem = "windows")))]
 
 use tokio::runtime::Builder;
 use tokio::sync::RwLock;
