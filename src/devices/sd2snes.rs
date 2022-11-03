@@ -1,7 +1,6 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
-use tokio_serial::{self, SerialPortInfo, SerialStream};
-use serialport::{SerialPort, SerialPortType};
+use tokio_serial::{self, SerialPortInfo, SerialStream, SerialPort, SerialPortType};
 use tokio::sync::mpsc::{Sender, channel};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -231,7 +230,8 @@ impl SD2Snes {
     async fn start(id: Uuid, port_name: &str, _snes_manager_tx: Sender<(String, DeviceInfo)>) -> Device {
         let mut stream = tokio_serial::SerialStream::open(&tokio_serial::new(port_name, 921600)).unwrap();
         stream.write_data_terminal_ready(true).unwrap();
-        stream.set_flow_control(serialport::FlowControl::None).unwrap();
+        stream.set_flow_control(tokio_serial::FlowControl::None).unwrap();
+                
 
         let mut sd2snes = SD2Snes::new(id, port_name, stream);
 

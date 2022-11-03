@@ -3,15 +3,15 @@
 
 use tokio::runtime::Builder;
 use tokio::sync::RwLock;
-use std::sync::Arc;
+use std::sync::{Arc};
 
 mod server;
-
-#[cfg(feature = "gui")] mod qt;
 
 mod manager;
 mod devices;
 mod protocol;
+
+mod tao;
 
 fn main() {
     //console_subscriber::init();
@@ -40,17 +40,17 @@ fn main() {
 
     #[cfg(feature = "gui")]
     {
-        /* Run QT Main Thread */
+        /* Run tao Main Thread */
         
-        /* By giving the qt thread access to the tokio threadpool runtime and a reference to the manager,
-        it's possible to access the internal device manager state from the QT-side by using
-        runtime.block_on() to execute async-code on the qt main thread.
+        /* By giving the tao thread access to the tokio threadpool runtime and a reference to the manager,
+        it's possible to access the internal device manager state from the tao side by using
+        runtime.block_on() to execute async-code on the tao main thread.
         
-        This will ofcourse block the QT thread for the duration of the async calls, but it shouldn't
+        This will ofcourse block the tao thread for the duration of the async calls, but it shouldn't
         be a big issue since most calls will be things that should be guaranteed to return quickly.
         */
-        let qt_manager = manager;    
-        qt::run_qt(runtime, qt_manager);
+        let tao_manager = manager.clone();
+        tao::run(runtime, tao_manager);
     }
 
     #[cfg(not(feature = "gui"))]
@@ -60,4 +60,7 @@ fn main() {
             tokio::signal::ctrl_c().await.unwrap();
         });            
     }
+
+
+
 }
