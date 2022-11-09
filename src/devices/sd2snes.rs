@@ -443,7 +443,6 @@ impl SD2Snes {
                                 }                                
                             },
                             DeviceRequest::Close => {
-                                //let _ = sd2snes.port.
                                 break
                             },
                         }    

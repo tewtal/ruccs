@@ -4,14 +4,15 @@
 use tokio::runtime::Builder;
 use tokio::sync::RwLock;
 use std::sync::{Arc};
+mod tao;
+
+mod devices;
+mod util;
 
 mod server;
-
 mod manager;
-mod devices;
 mod protocol;
 
-mod tao;
 
 fn main() {
     //console_subscriber::init();

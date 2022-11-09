@@ -388,7 +388,12 @@ impl EmuNwaManager {
                     Some(message) = device_manager_rx.recv() => {
                         match message {
                             DeviceManagerCommand::Close => {
-                                /* Close everything  */
+                                for (port, device) in &devices {
+                                    let _ = device.sender.send(DeviceRequest::Close).await;
+                                    let _ = enumerator_tx.send(EmuInfo::EmuRemoved { name: device.name.clone(), port: port.clone()}).await;
+                                }
+                                
+                                devices.clear();
                                 return;
                             }
                         }
