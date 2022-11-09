@@ -4,7 +4,7 @@ use tokio::time::{Duration, timeout};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use tokio::sync::mpsc::{Sender, channel};
+use tokio::sync::mpsc::{Sender, channel, Receiver};
 use tokio::io::{AsyncWriteExt};
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
@@ -14,21 +14,31 @@ use crate::devices::device::{DeviceRequest, DeviceResponse, Device, DeviceInfo, 
 use crate::manager::ManagerInfo;
 use crate::protocol::{AddressInfo, Command, MemoryDomain};
 
+const VERSION_DATA: &[u8] = "VERSION\n".as_bytes();
+const STATUS_DATA: &[u8] = "GET_STATUS\n".as_bytes();
+const RAM_CHECK_DATA: &[u8] = "READ_CORE_RAM 0 10\n".as_bytes();
+const ROM_CHECK_DATA: &[u8] = "READ_CORE_MEMORY FFC0 21\n".as_bytes();
 
 #[allow(dead_code)]
 pub struct Retroarch {
     id: Uuid,
     name: String,
     socket: UdpSocket,
-    addr: SocketAddr,
+    addr: String,
     ra_version: String,
     rom_access: bool,
     rom_name: String
 }
 
+#[derive(Debug)]
+pub enum RaInfo {
+    RaAdded { name: String, url: String, version: String, rom_access: bool, rom_name: String },
+    RaRemoved { name: String, url: String }
+}
+
 /* This implements the core of a Lua network device */
 impl Retroarch {
-    pub fn new(id: Uuid, socket: UdpSocket, addr: SocketAddr, ra_version: &str, rom_access: bool, rom_name: &str) -> Self
+    pub fn new(id: Uuid, socket: UdpSocket, addr: String, ra_version: &str, rom_access: bool, rom_name: &str) -> Self
     {
         Self {
             id,
@@ -97,7 +107,10 @@ impl Retroarch {
 
     /* This starts a device when an incoming connection is opened to the LUA Device port */
     /* It spawns a tokio task that listens for both incoming device messages and tcp/ip events */
-    async fn start(id: Uuid, socket: UdpSocket, addr: SocketAddr, ra_version: &str, rom_access: bool, rom_name: &str, ra_manager_tx: Sender<(Uuid, DeviceInfo)>) -> Device {
+    async fn start(id: Uuid, addr: String, ra_version: &str, rom_access: bool, rom_name: &str, ra_manager_tx: Sender<(Uuid, DeviceInfo)>) -> Device {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let _ = socket.connect(&addr).await.unwrap();
+
         let mut ra = Retroarch::new(id, socket, addr, ra_version, rom_access, rom_name);
 
         /* The main communication channel for this specific device, all clients will have to go through this to use the device */
@@ -167,102 +180,138 @@ impl Retroarch {
     }
 }
 
-enum RetroarchState {
-    Searching,
-    Connected,
-    Playing,
-    Disconnected
-}
-
 pub struct RetroarchManager {}
 impl RetroarchManager {
     pub async fn start(sender: Sender<ManagerInfo>) -> Sender<DeviceManagerCommand> {
         let (device_manager_tx, mut device_manager_rx) = tokio::sync::mpsc::channel(32);
+        let mut devices = HashMap::new();
 
-            
-    tokio::spawn(async move {
-        let (ra_manager_tx, mut ra_manager_rx) = tokio::sync::mpsc::channel(32);
-        let remote_addr: SocketAddr = "127.0.0.1:55355".parse().unwrap();
-        let local_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let socket = UdpSocket::bind(local_addr).await.unwrap();
-        let _ = socket.connect(&remote_addr).await;        
-        let mut state = RetroarchState::Searching;
-        let mut recvbuf = vec![0u8; 65_507];
-        let mut devices: HashMap<String, Device> = HashMap::new();
-        let mut ra_version: String = "Unknown".to_string();
+        tokio::spawn(async move {
+            let (ra_manager_tx, mut ra_manager_rx) = tokio::sync::mpsc::channel(32);
+            let (mut ra_info_rx, enumerator_tx) = RetroarchManager::start_ra_enumerator().await;
 
-        loop {
-            match state {
-                RetroarchState::Searching => {
-                    let data = "VERSION\n".as_bytes();
-                    if socket.send(data).await.is_ok() {
-                        if let Ok(len) = socket.recv(&mut recvbuf).await {
-                            ra_version = String::from_utf8_lossy(&recvbuf[..len]).to_string();
-                            println!("Found RA {}", &ra_version);                           
-                            state = RetroarchState::Connected;                            
-                        }
-                    } 
-                },
-                RetroarchState::Connected => {
-                    let data = "GET_STATUS\n".as_bytes();
-                    if socket.send(data).await.is_ok() {
-                        if let Ok(len) = socket.recv(&mut recvbuf).await {
-                            let status_string = String::from_utf8_lossy(&recvbuf[..len]);
-                            println!("Found Status {}", status_string);
-                            if !status_string.contains("CONTENTLESS") {
-                                /* Detect core features */
-                                
-                                let _ = socket.send("READ_CORE_RAM 0 10\n".as_bytes()).await;
-                                if let Ok(len) = socket.recv(&mut recvbuf).await {
-                                    let read_data = String::from_utf8_lossy(&recvbuf[..len]);
-                                    if read_data.contains("-1") {
-                                        state = RetroarchState::Searching;
-                                        continue;
-                                    }
-                                } else {
-                                    state = RetroarchState::Searching;
-                                    continue;
-                                }
-
-                                let (rom_name, rom_access) = {
-                                    let _ = socket.send("READ_CORE_MEMORY FFC0 21\n".as_bytes()).await;
-                                    if let Ok(len) = socket.recv(&mut recvbuf).await {
-                                        let hex_str = String::from_utf8_lossy(&recvbuf[22..len]).trim_end().to_string();
-                                        let bin_data: Vec<u8> = hex_str.split(' ').into_iter().map(|h| u8::from_str_radix(h, 16).unwrap()).collect();
-                                        let rom_name = String::from_utf8_lossy(&bin_data).to_string();
-                                        (rom_name.to_string(), true)
-                                    } else {
-                                        (String::default(), false)
-                                    }
-                                };
-
+            loop {
+                tokio::select! {
+                    Some(message) = ra_info_rx.recv() => {
+                        match message {
+                            RaInfo::RaAdded { name: _, url, version, rom_access, rom_name } => {
                                 let id = Uuid::new_v4();
-                                let socket = UdpSocket::bind(local_addr).await.unwrap();
-                                socket.connect(remote_addr).await.unwrap();                                
-                                let device = Retroarch::start(id, socket, remote_addr, &ra_version, rom_access, &rom_name, ra_manager_tx.clone()).await;
+                                let device = Retroarch::start(id, url.to_string(), &version, rom_access, &rom_name, ra_manager_tx.clone()).await;
                                 sender.send(ManagerInfo::DeviceCreated(device.clone())).await.unwrap();
-                                devices.insert(remote_addr.to_string(), device);
-                                state = RetroarchState::Playing;
+                                devices.insert(url.to_string(), device);
+                            },
+                            RaInfo::RaRemoved { name: _, url } => {
+                                let device = &devices[&url];
+                                let _ = device.sender.send(DeviceRequest::Close).await;
+                                sender.send(ManagerInfo::DeviceRemoved(device.id)).await.unwrap();                                
+                                devices.remove(&url);
                             }
-                        } else {
-                            state = RetroarchState::Searching;
                         }
-                    } else {
-                        state = RetroarchState::Searching;
                     }
-                },
-                RetroarchState::Playing => {
-                    
-                },
-                RetroarchState::Disconnected => {
-                    /* Not sure where and when this will be set */
-                }                
+                }
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        }    
-    });
+        });
 
+            
         device_manager_tx
+    }
+
+    async fn start_ra_enumerator() -> (Receiver<RaInfo>, Sender<RaInfo>) {
+        let (ra_info_tx, ra_info_rx) = tokio::sync::mpsc::channel(32);
+        let (enumerator_tx, mut enumerator_rx) = tokio::sync::mpsc::channel(32);
+        let ra_address = "127.0.0.1:55355";
+        let ra_addrs = vec![ra_address];
+
+        tokio::spawn(async move {
+            let mut current_devices = HashMap::new();
+            loop {
+                for ra_addr in &ra_addrs {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                    if !current_devices.contains_key(&ra_addr.to_string()) {
+                        if let Ok(ra_info) = RetroarchManager::try_ra_connect(ra_addr).await {
+                            current_devices.insert(ra_addr.to_string(), ra_addr.to_string());
+                            let _ = ra_info_tx.send(ra_info).await;
+                        }
+                    } else {
+                        if RetroarchManager::check_ra_status(ra_addr).await.is_err() {
+                            current_devices.remove(&ra_addr.to_string());
+                            let _ = ra_info_tx.send(RaInfo::RaRemoved { name: String::default(), url: ra_addr.to_string() }).await;
+                        }
+                    }
+                }
+
+                match enumerator_rx.try_recv() {
+                    Ok(msg) => {
+                        match msg {
+                            RaInfo::RaRemoved { name: _, url } => {
+                                current_devices.remove(&url);
+                            },
+                            _ => ()
+                        }
+                    },
+                    _ => ()
+                }
+            }
+        });
+
+        (ra_info_rx, enumerator_tx)
+    }
+
+    async fn try_ra_connect(ra_addr: &str) -> Result<RaInfo, Box<dyn std::error::Error + Send + Sync>> {
+
+
+        let mut buf = vec![0u8; 65_507];
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let _ = socket.send_to(VERSION_DATA, ra_addr).await?;
+        let (len, _) = socket.recv_from(&mut buf).await?;
+
+        let ra_version = String::from_utf8_lossy(&buf[..len]).to_string();
+
+        let _ = socket.send_to(STATUS_DATA, ra_addr).await?;
+        let (len, _) = socket.recv_from(&mut buf).await?;
+
+        let ra_status = String::from_utf8_lossy(&buf[..len]).to_string();
+        if ra_status.contains("CONTENTLESS") {
+            return Err("Retroarch found, but no content loaded".into());
+        }
+
+        let _ = socket.send_to(RAM_CHECK_DATA, ra_addr).await?;
+        let (len, _) = socket.recv_from(&mut buf).await?;
+        let ram_check = String::from_utf8_lossy(&buf[..len]).to_string();
+        if ram_check.contains("-1") {
+            return Err("Retroarch found, but core returned -1 on READ_CORE_RAM".into());
+        }
+
+        let (rom_access, rom_name) = {
+            let _ = socket.send_to(ROM_CHECK_DATA, ra_addr).await?;
+            let (len, _) = socket.recv_from(&mut buf).await?;
+            let data = String::from_utf8_lossy(&buf[..len]).to_string();
+            if !data.contains("-1") {
+                let hex_str = String::from_utf8_lossy(&buf[22..len]).trim_end().to_string();
+                let bin_data: Vec<u8> = hex_str.split(' ').into_iter().map(|h| u8::from_str_radix(h, 16).unwrap()).collect();
+                let rom_name = String::from_utf8_lossy(&bin_data).to_string();
+                (true, rom_name.to_string())  
+            } else {
+                (false, String::default())
+            }
+        };
+
+        Ok(RaInfo::RaAdded { name: format!("RetroArch {} ({})", ra_version, ra_addr), url: ra_addr.to_string(), version: ra_version, rom_access, rom_name})
+    }
+
+    async fn check_ra_status(ra_addr: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut buf = vec![0u8; 65_507];
+        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let _ = socket.send_to(STATUS_DATA, ra_addr).await?;
+        let (len, _) = socket.recv_from(&mut buf).await?;
+
+        let ra_status = String::from_utf8_lossy(&buf[..len]).to_string();
+        if ra_status.contains("CONTENTLESS") {
+            return Err("Retroarch found, but no content loaded".into());
+        }
+
+        Ok(())
     }
 }

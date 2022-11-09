@@ -1,14 +1,14 @@
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::{Sender, channel};
 use std::collections::HashMap;
-use std::time::{Instant, Duration};
+use std::time::{Instant};
 use uuid::Uuid;
 
 use crate::devices::device::{DeviceRequest, DeviceResponse, Device, DeviceInfo, DeviceManagerCommand};
 use crate::manager::ManagerInfo;
 use crate::protocol::{self, AddressInfo, Flags, Opcode, Space};
 
-use serialport::{SerialPort, SerialPortInfo, SerialPortType, ClearBuffer};
+use serialport::{SerialPort, SerialPortInfo, SerialPortType};
 
 #[allow(dead_code)]
 pub struct SD2Snes {
